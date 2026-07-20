@@ -10,9 +10,10 @@ Private Const DEST_PHN_SLFSM As String = "phn_YYYYMMDD_slfsm TOD"
 
 ' Source report dated today and appended as history.
 Private Const DEST_SHORT_STOCK As String = "YYYYMMDD_SHORT_STOCK_DETAIL"
+Private Const DEST_PHN160_INTEREST As String = "PHN160BS - interest"
 
 Public Sub Import_All_PB_Reports()
-    Const REPORT_COUNT As Long = 7
+    Const REPORT_COUNT As Long = 8
 
     Dim hostWb As Workbook
     Dim targets(1 To REPORT_COUNT) As Worksheet
@@ -22,7 +23,8 @@ Public Sub Import_All_PB_Reports()
     Dim reportFiles(1 To REPORT_COUNT) As String
     Dim results(1 To REPORT_COUNT) As String
     Dim appendMode(1 To REPORT_COUNT) As Boolean
-    Dim skipSourceHeader(1 To REPORT_COUNT) As Boolean
+    Dim sourceRowsToSkip(1 To REPORT_COUNT) As Long
+    Dim addCurrencyCodes(1 To REPORT_COUNT) As Boolean
 
     Dim downloadFolder As String
     Dim expectedPreviousDate As String
@@ -89,7 +91,13 @@ Public Sub Import_All_PB_Reports()
     masks(7) = todayReportDate & "_SHORT_STOCK_DETAIL.*"
     targetNames(7) = DEST_SHORT_STOCK
     appendMode(7) = True
-    skipSourceHeader(7) = True
+    sourceRowsToSkip(7) = 1
+
+    labels(8) = "PHN160BS INTEREST"
+    masks(8) = "mtd_interest_report_" & Format$(Date, "mm_dd_yyyy") & "*.*"
+    targetNames(8) = DEST_PHN160_INTEREST
+    sourceRowsToSkip(8) = 2
+    addCurrencyCodes(8) = True
 
     ' Locate every source before changing any destination tab.
     For i = 2 To REPORT_COUNT
@@ -127,7 +135,8 @@ Public Sub Import_All_PB_Reports()
     For i = 1 To REPORT_COUNT
         Application.StatusBar = "Importing " & labels(i) & " (" & i & "/" & REPORT_COUNT & ")..."
         results(i) = ImportOneReport(reportFiles(i), targets(i), _
-                                     appendMode(i), skipSourceHeader(i))
+                                     appendMode(i), sourceRowsToSkip(i), _
+                                     addCurrencyCodes(i))
     Next i
 
     completed = True
@@ -172,12 +181,14 @@ End Sub
 Private Function ImportOneReport(ByVal sourcePath As String, _
                                  ByVal destinationSheet As Worksheet, _
                                  ByVal appendData As Boolean, _
-                                 ByVal skipHeader As Boolean) As String
+                                 ByVal rowsToSkip As Long, _
+                                 ByVal addCurrency As Boolean) As String
     Dim sourceWb As Workbook
     Dim sourceWs As Worksheet
     Dim sourceData As Range
     Dim dataToPaste As Range
     Dim pasteCell As Range
+    Dim pastedRange As Range
     Dim rowCount As Long
     Dim columnCount As Long
     Dim destinationLastRow As Long
@@ -207,18 +218,20 @@ Private Function ImportOneReport(ByVal sourcePath As String, _
                   "Source report is empty: " & FileNameOnly(sourcePath)
     End If
 
-    If skipHeader Then
-        ' Clean any repeated source header left by an earlier import.
-        RemoveRepeatedHeaderRows destinationSheet, sourceData
+    If rowsToSkip > 0 Then
+        If appendData And rowsToSkip = 1 Then
+            ' Clean any repeated SHORT STOCK header left by an earlier import.
+            RemoveRepeatedHeaderRows destinationSheet, sourceData
+        End If
 
-        If sourceData.Rows.Count <= 1 Then
-            ImportOneReport = "source contains header only; 0 rows appended"
+        If sourceData.Rows.Count <= rowsToSkip Then
+            ImportOneReport = "source contains no rows after skipped headings"
             sourceWb.Close SaveChanges:=False
             Exit Function
         End If
 
-        Set dataToPaste = sourceData.Offset(1, 0).Resize( _
-                              sourceData.Rows.Count - 1, _
+        Set dataToPaste = sourceData.Offset(rowsToSkip, 0).Resize( _
+                              sourceData.Rows.Count - rowsToSkip, _
                               sourceData.Columns.Count)
     Else
         Set dataToPaste = sourceData
@@ -250,11 +263,18 @@ Private Function ImportOneReport(ByVal sourcePath As String, _
     pasteCell.PasteSpecial Paste:=xlPasteValuesAndNumberFormats
     Application.CutCopyMode = False
 
+    Set pastedRange = destinationSheet.Range(pasteCell, _
+                      pasteCell.Offset(rowCount - 1, columnCount - 1))
+
+    If addCurrency Then AddInterestCurrencyCodes pastedRange
+
     If appendData Then
         ImportOneReport = rowCount & " rows appended"
-        If skipHeader Then ImportOneReport = ImportOneReport & "; source header removed"
+        If rowsToSkip > 0 Then ImportOneReport = ImportOneReport & "; source header removed"
     Else
         ImportOneReport = rowCount & " rows x " & columnCount & " columns replaced"
+        If rowsToSkip > 0 Then ImportOneReport = ImportOneReport & "; top " & rowsToSkip & " rows removed"
+        If addCurrency Then ImportOneReport = ImportOneReport & "; CAD/USD added"
     End If
 
     sourceWb.Close SaveChanges:=False
@@ -268,6 +288,82 @@ ImportOneFailed:
     If Not sourceWb Is Nothing Then sourceWb.Close SaveChanges:=False
     On Error GoTo 0
     Err.Raise savedErrorNumber, "ImportOneReport", savedErrorText
+End Function
+
+Private Sub AddInterestCurrencyCodes(ByVal pastedRange As Range)
+    Dim dateColumn As Long
+    Dim currencyColumn As Long
+    Dim rowNumber As Long
+    Dim currentCurrency As String
+    Dim rowText As String
+    Dim dateValue As Variant
+
+    dateColumn = FindHeaderColumn(pastedRange, "date")
+    If dateColumn = 0 Then
+        Err.Raise vbObjectError + 2020, "AddInterestCurrencyCodes", _
+                  "Date column was not found in PHN160BS interest report."
+    End If
+
+    currencyColumn = pastedRange.Column + pastedRange.Columns.Count
+
+    For rowNumber = 1 To pastedRange.Rows.Count
+        rowText = LCase$(RowTextValue(pastedRange.Rows(rowNumber)))
+
+        If InStr(1, rowText, "canadian dollar", vbTextCompare) > 0 Then
+            currentCurrency = "CAD"
+        ElseIf InStr(1, rowText, "usa dollar", vbTextCompare) > 0 _
+            Or InStr(1, rowText, "us dollar", vbTextCompare) > 0 _
+            Or InStr(1, rowText, "u.s. dollar", vbTextCompare) > 0 Then
+            currentCurrency = "USD"
+        End If
+
+        dateValue = pastedRange.Cells(rowNumber, dateColumn).Value
+
+        If Len(currentCurrency) > 0 And IsDate(dateValue) Then
+            pastedRange.Worksheet.Cells( _
+                pastedRange.Row + rowNumber - 1, currencyColumn).Value2 = currentCurrency
+        End If
+    Next rowNumber
+End Sub
+
+Private Function FindHeaderColumn(ByVal reportRange As Range, _
+                                  ByVal headerText As String) As Long
+    Dim maximumRows As Long
+    Dim rowNumber As Long
+    Dim columnNumber As Long
+    Dim cellText As String
+
+    maximumRows = reportRange.Rows.Count
+    If maximumRows > 20 Then maximumRows = 20
+
+    For rowNumber = 1 To maximumRows
+        For columnNumber = 1 To reportRange.Columns.Count
+            If Not IsError(reportRange.Cells(rowNumber, columnNumber).Value2) Then
+                cellText = LCase$(Trim$(CStr( _
+                           reportRange.Cells(rowNumber, columnNumber).Value2)))
+
+                If cellText = LCase$(headerText) Then
+                    FindHeaderColumn = columnNumber
+                    Exit Function
+                End If
+            End If
+        Next columnNumber
+    Next rowNumber
+End Function
+
+Private Function RowTextValue(ByVal reportRow As Range) As String
+    Dim cell As Range
+    Dim combinedText As String
+
+    For Each cell In reportRow.Cells
+        If Not IsError(cell.Value2) Then
+            If Len(Trim$(CStr(cell.Value2))) > 0 Then
+                combinedText = combinedText & " " & CStr(cell.Value2)
+            End If
+        End If
+    Next cell
+
+    RowTextValue = combinedText
 End Function
 
 Private Sub RemoveRepeatedHeaderRows(ByVal destinationSheet As Worksheet, _
