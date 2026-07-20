@@ -45,8 +45,7 @@ Public Sub Import_RGA_TOD_Reports()
     If Len(lieFile) = 0 Then
         lieFile = PickReport(downloadFolder, _
                              "Select the rga_YYYYMMDD_lie report")
-                             "Select the previous-business-day LIE report (expected " & _
-                             expectedDate & ")")
+        lieFile = PickReport(downloadFolder, "Select LIE report for " & expectedDate)
     End If
     If Len(lieFile) = 0 Then Exit Sub
     reportDate = ExtractReportDate(lieFile)
