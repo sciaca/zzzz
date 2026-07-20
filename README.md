@@ -22,6 +22,7 @@ Public Sub Import_All_PB_Reports()
     Dim targetNames(1 To REPORT_COUNT) As String
     Dim reportFiles(1 To REPORT_COUNT) As String
     Dim results(1 To REPORT_COUNT) As String
+    Dim appendMode(1 To REPORT_COUNT) As Boolean
 
     Dim downloadFolder As String
     Dim expectedPreviousDate As String
@@ -47,7 +48,7 @@ Public Sub Import_All_PB_Reports()
         downloadFolder = hostWb.Path & Application.PathSeparator
     End If
 
-    expectedPreviousDate = Format$(PreviousBusinessDay(Date), "yyyymmdd")
+    expectedPreviousDate = Format$(PreviousCanadianBusinessDay(Date), "yyyymmdd")
     todayReportDate = Format$(Date, "yyyymmdd")
 
     labels(1) = "RGA LIE"
@@ -87,10 +88,12 @@ Public Sub Import_All_PB_Reports()
     labels(7) = "SHORT STOCK DETAIL"
     masks(7) = todayReportDate & "_SHORT_STOCK_DETAIL.*"
     targetNames(7) = DEST_SHORT_STOCK
+    appendMode(7) = True
 
     labels(8) = "INTEREST ACTIVITY"
     masks(8) = todayReportDate & "_INTEREST_ACTIVITY.*"
     targetNames(8) = DEST_INTEREST
+    appendMode(8) = True
 
     ' Locate every source before changing any destination tab.
     For i = 2 To REPORT_COUNT
@@ -127,7 +130,7 @@ Public Sub Import_All_PB_Reports()
 
     For i = 1 To REPORT_COUNT
         Application.StatusBar = "Importing " & labels(i) & " (" & i & "/" & REPORT_COUNT & ")..."
-        results(i) = ImportOneReport(reportFiles(i), targets(i))
+        results(i) = ImportOneReport(reportFiles(i), targets(i), appendMode(i))
     Next i
 
     completed = True
@@ -170,12 +173,16 @@ ImportFailed:
 End Sub
 
 Private Function ImportOneReport(ByVal sourcePath As String, _
-                                 ByVal destinationSheet As Worksheet) As String
+                                 ByVal destinationSheet As Worksheet, _
+                                 ByVal appendData As Boolean) As String
     Dim sourceWb As Workbook
     Dim sourceWs As Worksheet
     Dim sourceData As Range
+    Dim dataToPaste As Range
+    Dim pasteCell As Range
     Dim rowCount As Long
     Dim columnCount As Long
+    Dim destinationLastRow As Long
     Dim savedErrorNumber As Long
     Dim savedErrorText As String
 
@@ -202,15 +209,34 @@ Private Function ImportOneReport(ByVal sourcePath As String, _
                   "Source report is empty: " & FileNameOnly(sourcePath)
     End If
 
-    rowCount = sourceData.Rows.Count
-    columnCount = sourceData.Columns.Count
+    Set dataToPaste = sourceData
 
-    destinationSheet.UsedRange.ClearContents
-    sourceData.Copy
-    destinationSheet.Range("A1").PasteSpecial Paste:=xlPasteValuesAndNumberFormats
+    If appendData Then
+        destinationLastRow = LastUsedRow(destinationSheet)
+
+        If destinationLastRow > 0 Then
+            Set pasteCell = destinationSheet.Cells(destinationLastRow + 1, 1)
+        Else
+            Set pasteCell = destinationSheet.Range("A1")
+        End If
+    Else
+        destinationSheet.UsedRange.ClearContents
+        Set pasteCell = destinationSheet.Range("A1")
+    End If
+
+    rowCount = dataToPaste.Rows.Count
+    columnCount = dataToPaste.Columns.Count
+
+    dataToPaste.Copy
+    pasteCell.PasteSpecial Paste:=xlPasteValuesAndNumberFormats
     Application.CutCopyMode = False
 
-    ImportOneReport = rowCount & " rows x " & columnCount & " columns"
+    If appendData Then
+        ImportOneReport = rowCount & " rows appended"
+    Else
+        ImportOneReport = rowCount & " rows x " & columnCount & " columns replaced"
+    End If
+
     sourceWb.Close SaveChanges:=False
     Exit Function
 
@@ -222,6 +248,21 @@ ImportOneFailed:
     If Not sourceWb Is Nothing Then sourceWb.Close SaveChanges:=False
     On Error GoTo 0
     Err.Raise savedErrorNumber, "ImportOneReport", savedErrorText
+End Function
+
+Private Function LastUsedRow(ByVal ws As Worksheet) As Long
+    Dim lastCell As Range
+
+    Set lastCell = ws.Cells.Find(What:="*", _
+                                 After:=ws.Cells(1, 1), _
+                                 LookIn:=xlFormulas, _
+                                 LookAt:=xlPart, _
+                                 SearchOrder:=xlByRows, _
+                                 SearchDirection:=xlPrevious, _
+                                 MatchCase:=False, _
+                                 SearchFormat:=False)
+
+    If Not lastCell Is Nothing Then LastUsedRow = lastCell.Row
 End Function
 
 Private Function ResolveReport(ByVal folderPath As String, _
@@ -236,15 +277,123 @@ Private Function ResolveReport(ByVal folderPath As String, _
     End If
 End Function
 
-Private Function PreviousBusinessDay(ByVal referenceDate As Date) As Date
+Private Function PreviousCanadianBusinessDay(ByVal referenceDate As Date) As Date
     Dim resultDate As Date
 
     resultDate = DateValue(referenceDate) - 1
-    Do While Weekday(resultDate, vbMonday) > 5
+    Do While Weekday(resultDate, vbMonday) > 5 _
+             Or IsCanadianBankHoliday(resultDate)
         resultDate = resultDate - 1
     Loop
 
-    PreviousBusinessDay = resultDate
+    PreviousCanadianBusinessDay = resultDate
+End Function
+
+Private Function IsCanadianBankHoliday(ByVal dateToCheck As Date) As Boolean
+    Dim calendarDate As Date
+    Dim calendarYear As Long
+    Dim christmasObserved As Date
+    Dim boxingDayObserved As Date
+
+    calendarDate = DateValue(dateToCheck)
+    calendarYear = Year(calendarDate)
+
+    ' Bank of Canada / Ontario banking calendar.
+    If calendarDate = ObservedWeekday(DateSerial(calendarYear, 1, 1)) Then GoTo HolidayFound
+    If calendarDate = NthWeekdayOfMonth(calendarYear, 2, vbMonday, 3) Then GoTo HolidayFound
+    If calendarDate = EasterSunday(calendarYear) - 2 Then GoTo HolidayFound
+    If calendarDate = VictoriaDay(calendarYear) Then GoTo HolidayFound
+    If calendarDate = ObservedWeekday(DateSerial(calendarYear, 7, 1)) Then GoTo HolidayFound
+    If calendarDate = NthWeekdayOfMonth(calendarYear, 8, vbMonday, 1) Then GoTo HolidayFound
+    If calendarDate = NthWeekdayOfMonth(calendarYear, 9, vbMonday, 1) Then GoTo HolidayFound
+    If calendarDate = ObservedWeekday(DateSerial(calendarYear, 9, 30)) Then GoTo HolidayFound
+    If calendarDate = NthWeekdayOfMonth(calendarYear, 10, vbMonday, 2) Then GoTo HolidayFound
+    If calendarDate = ObservedWeekday(DateSerial(calendarYear, 11, 11)) Then GoTo HolidayFound
+
+    christmasObserved = ObservedWeekday(DateSerial(calendarYear, 12, 25))
+    boxingDayObserved = ObservedWeekday(DateSerial(calendarYear, 12, 26))
+
+    Do While boxingDayObserved = christmasObserved _
+             Or Weekday(boxingDayObserved, vbMonday) > 5
+        boxingDayObserved = boxingDayObserved + 1
+    Loop
+
+    If calendarDate = christmasObserved Then GoTo HolidayFound
+    If calendarDate = boxingDayObserved Then GoTo HolidayFound
+
+    Exit Function
+
+HolidayFound:
+    IsCanadianBankHoliday = True
+End Function
+
+Private Function ObservedWeekday(ByVal holidayDate As Date) As Date
+    Select Case Weekday(holidayDate, vbMonday)
+        Case 6
+            ObservedWeekday = holidayDate + 2
+        Case 7
+            ObservedWeekday = holidayDate + 1
+        Case Else
+            ObservedWeekday = holidayDate
+    End Select
+End Function
+
+Private Function NthWeekdayOfMonth(ByVal calendarYear As Long, _
+                                   ByVal calendarMonth As Long, _
+                                   ByVal weekdayNumber As VbDayOfWeek, _
+                                   ByVal occurrenceNumber As Long) As Date
+    Dim firstDate As Date
+    Dim dayOffset As Long
+
+    firstDate = DateSerial(calendarYear, calendarMonth, 1)
+    dayOffset = (weekdayNumber - Weekday(firstDate, vbSunday) + 7) Mod 7
+
+    NthWeekdayOfMonth = firstDate + dayOffset + (7 * (occurrenceNumber - 1))
+End Function
+
+Private Function VictoriaDay(ByVal calendarYear As Long) As Date
+    Dim resultDate As Date
+
+    resultDate = DateSerial(calendarYear, 5, 24)
+    Do While Weekday(resultDate, vbMonday) <> 1
+        resultDate = resultDate - 1
+    Loop
+
+    VictoriaDay = resultDate
+End Function
+
+Private Function EasterSunday(ByVal calendarYear As Long) As Date
+    Dim a As Long
+    Dim b As Long
+    Dim c As Long
+    Dim d As Long
+    Dim e As Long
+    Dim f As Long
+    Dim g As Long
+    Dim h As Long
+    Dim i As Long
+    Dim k As Long
+    Dim l As Long
+    Dim m As Long
+    Dim easterMonth As Long
+    Dim easterDay As Long
+
+    a = calendarYear Mod 19
+    b = calendarYear \ 100
+    c = calendarYear Mod 100
+    d = b \ 4
+    e = b Mod 4
+    f = (b + 8) \ 25
+    g = (b - f + 1) \ 3
+    h = (19 * a + b - d - g + 15) Mod 30
+    i = c \ 4
+    k = c Mod 4
+    l = (32 + 2 * e + 2 * i - h - k) Mod 7
+    m = (a + 11 * h + 22 * l) \ 451
+    easterMonth = (h + l - 7 * m + 114) \ 31
+    easterDay = ((h + l - 7 * m + 114) Mod 31) + 1
+
+    EasterSunday = DateSerial(calendarYear, easterMonth, easterDay)
 End Function
 
 Private Function RealDataRange(ByVal ws As Worksheet) As Range
