@@ -11,9 +11,11 @@ Private Const DEST_PHN_SLFSM As String = "phn_YYYYMMDD_slfsm TOD"
 ' Source report dated today and appended as history.
 Private Const DEST_SHORT_STOCK As String = "YYYYMMDD_SHORT_STOCK_DETAIL"
 Private Const DEST_PHN160_INTEREST As String = "PHN160BS - interest"
+Private Const DEST_TD_INTEREST As String = "TD Interest"
+Private Const DEST_STOCKLOAN_TOD As String = "Stockloan-TOD"
 
 Public Sub Import_All_PB_Reports()
-    Const REPORT_COUNT As Long = 8
+    Const REPORT_COUNT As Long = 10
 
     Dim hostWb As Workbook
     Dim targets(1 To REPORT_COUNT) As Worksheet
@@ -29,6 +31,7 @@ Public Sub Import_All_PB_Reports()
     Dim downloadFolder As String
     Dim expectedPreviousDate As String
     Dim previousReportDate As String
+    Dim previousReportDateUS As String
     Dim todayReportDate As String
     Dim i As Long
     Dim summaryText As String
@@ -67,6 +70,8 @@ Public Sub Import_All_PB_Reports()
                   "No YYYYMMDD date was found in: " & FileNameOnly(reportFiles(1))
     End If
 
+    previousReportDateUS = YYYYMMDDToMMDDYYYY(previousReportDate)
+
     labels(2) = "RGA ABV"
     masks(2) = "rga0300_" & previousReportDate & "_abv.*"
     targetNames(2) = DEST_RGA_ABV
@@ -99,9 +104,17 @@ Public Sub Import_All_PB_Reports()
     sourceRowsToSkip(8) = 2
     addCurrencyCodes(8) = True
 
+    labels(9) = "TD INTEREST"
+    masks(9) = "finance_" & previousReportDateUS & ".*"
+    targetNames(9) = DEST_TD_INTEREST
+
+    labels(10) = "STOCKLOAN TOD"
+    masks(10) = "loanfees_" & previousReportDateUS & ".*"
+    targetNames(10) = DEST_STOCKLOAN_TOD
+
     ' Locate every source before changing any destination tab.
     For i = 2 To REPORT_COUNT
-        If i <= 6 Then
+        If i <= 6 Or i >= 9 Then
             reportFiles(i) = ResolveReport(downloadFolder, masks(i), labels(i), previousReportDate)
         Else
             reportFiles(i) = ResolveReport(downloadFolder, masks(i), labels(i), todayReportDate)
@@ -692,6 +705,17 @@ Private Function PickReport(ByVal initialFolder As String, _
 
         If .Show = -1 Then PickReport = .SelectedItems(1)
     End With
+End Function
+
+Private Function YYYYMMDDToMMDDYYYY(ByVal dateText As String) As String
+    If Len(dateText) <> 8 Or Not dateText Like "########" Then
+        Err.Raise vbObjectError + 2030, "YYYYMMDDToMMDDYYYY", _
+                  "Invalid YYYYMMDD date: " & dateText
+    End If
+
+    YYYYMMDDToMMDDYYYY = Mid$(dateText, 5, 2) & "_" & _
+                         Right$(dateText, 2) & "_" & _
+                         Left$(dateText, 4)
 End Function
 
 Private Function ExtractReportDate(ByVal fullPath As String) As String
