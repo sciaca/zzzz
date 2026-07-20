@@ -8,12 +8,11 @@ Private Const DEST_RBC_SLFSM As String = "rbc_YYYYMMDD_slfsm TOD"
 Private Const DEST_PHN_INTAM As String = "phn_YYYYMMDD_intam"
 Private Const DEST_PHN_SLFSM As String = "phn_YYYYMMDD_slfsm TOD"
 
-' Source reports dated today.
+' Source report dated today and appended as history.
 Private Const DEST_SHORT_STOCK As String = "YYYYMMDD_SHORT_STOCK_DETAIL"
-Private Const DEST_INTEREST As String = "YYYYMMDD_INTEREST_ACTIVITY"
 
 Public Sub Import_All_PB_Reports()
-    Const REPORT_COUNT As Long = 8
+    Const REPORT_COUNT As Long = 7
 
     Dim hostWb As Workbook
     Dim targets(1 To REPORT_COUNT) As Worksheet
@@ -23,6 +22,7 @@ Public Sub Import_All_PB_Reports()
     Dim reportFiles(1 To REPORT_COUNT) As String
     Dim results(1 To REPORT_COUNT) As String
     Dim appendMode(1 To REPORT_COUNT) As Boolean
+    Dim skipSourceHeader(1 To REPORT_COUNT) As Boolean
 
     Dim downloadFolder As String
     Dim expectedPreviousDate As String
@@ -89,11 +89,7 @@ Public Sub Import_All_PB_Reports()
     masks(7) = todayReportDate & "_SHORT_STOCK_DETAIL.*"
     targetNames(7) = DEST_SHORT_STOCK
     appendMode(7) = True
-
-    labels(8) = "INTEREST ACTIVITY"
-    masks(8) = todayReportDate & "_INTEREST_ACTIVITY.*"
-    targetNames(8) = DEST_INTEREST
-    appendMode(8) = True
+    skipSourceHeader(7) = True
 
     ' Locate every source before changing any destination tab.
     For i = 2 To REPORT_COUNT
@@ -130,7 +126,8 @@ Public Sub Import_All_PB_Reports()
 
     For i = 1 To REPORT_COUNT
         Application.StatusBar = "Importing " & labels(i) & " (" & i & "/" & REPORT_COUNT & ")..."
-        results(i) = ImportOneReport(reportFiles(i), targets(i), appendMode(i))
+        results(i) = ImportOneReport(reportFiles(i), targets(i), _
+                                     appendMode(i), skipSourceHeader(i))
     Next i
 
     completed = True
@@ -174,7 +171,8 @@ End Sub
 
 Private Function ImportOneReport(ByVal sourcePath As String, _
                                  ByVal destinationSheet As Worksheet, _
-                                 ByVal appendData As Boolean) As String
+                                 ByVal appendData As Boolean, _
+                                 ByVal skipHeader As Boolean) As String
     Dim sourceWb As Workbook
     Dim sourceWs As Worksheet
     Dim sourceData As Range
@@ -209,12 +207,33 @@ Private Function ImportOneReport(ByVal sourcePath As String, _
                   "Source report is empty: " & FileNameOnly(sourcePath)
     End If
 
-    Set dataToPaste = sourceData
+    If skipHeader Then
+        ' Clean any repeated source header left by an earlier import.
+        RemoveRepeatedHeaderRows destinationSheet, sourceData
+
+        If sourceData.Rows.Count <= 1 Then
+            ImportOneReport = "source contains header only; 0 rows appended"
+            sourceWb.Close SaveChanges:=False
+            Exit Function
+        End If
+
+        Set dataToPaste = sourceData.Offset(1, 0).Resize( _
+                              sourceData.Rows.Count - 1, _
+                              sourceData.Columns.Count)
+    Else
+        Set dataToPaste = sourceData
+    End If
 
     If appendData Then
         destinationLastRow = LastUsedRow(destinationSheet)
 
         If destinationLastRow > 0 Then
+            If BlockAlreadyAtBottom(dataToPaste, destinationSheet, destinationLastRow) Then
+                ImportOneReport = "same data already present; 0 rows appended"
+                sourceWb.Close SaveChanges:=False
+                Exit Function
+            End If
+
             Set pasteCell = destinationSheet.Cells(destinationLastRow + 1, 1)
         Else
             Set pasteCell = destinationSheet.Range("A1")
@@ -233,6 +252,7 @@ Private Function ImportOneReport(ByVal sourcePath As String, _
 
     If appendData Then
         ImportOneReport = rowCount & " rows appended"
+        If skipHeader Then ImportOneReport = ImportOneReport & "; source header removed"
     Else
         ImportOneReport = rowCount & " rows x " & columnCount & " columns replaced"
     End If
@@ -248,6 +268,87 @@ ImportOneFailed:
     If Not sourceWb Is Nothing Then sourceWb.Close SaveChanges:=False
     On Error GoTo 0
     Err.Raise savedErrorNumber, "ImportOneReport", savedErrorText
+End Function
+
+Private Sub RemoveRepeatedHeaderRows(ByVal destinationSheet As Worksheet, _
+                                     ByVal sourceData As Range)
+    Dim destinationLastRow As Long
+    Dim rowNumber As Long
+    Dim columnNumber As Long
+    Dim rowMatchesHeader As Boolean
+
+    destinationLastRow = LastUsedRow(destinationSheet)
+
+    For rowNumber = destinationLastRow To 2 Step -1
+        rowMatchesHeader = True
+
+        For columnNumber = 1 To sourceData.Columns.Count
+            If HeaderValue(destinationSheet.Cells(rowNumber, columnNumber).Value2) <> _
+               HeaderValue(sourceData.Cells(1, columnNumber).Value2) Then
+                rowMatchesHeader = False
+                Exit For
+            End If
+        Next columnNumber
+
+        If rowMatchesHeader Then destinationSheet.Rows(rowNumber).Delete
+    Next rowNumber
+End Sub
+
+Private Function HeaderValue(ByVal cellValue As Variant) As String
+    If IsError(cellValue) Then
+        HeaderValue = "#ERROR"
+    ElseIf IsEmpty(cellValue) Then
+        HeaderValue = vbNullString
+    Else
+        HeaderValue = LCase$(Trim$(CStr(cellValue)))
+    End If
+End Function
+
+Private Function BlockAlreadyAtBottom(ByVal sourceData As Range, _
+                                      ByVal destinationSheet As Worksheet, _
+                                      ByVal destinationLastRow As Long) As Boolean
+    Dim existingBlock As Range
+    Dim sourceValues As Variant
+    Dim existingValues As Variant
+    Dim rowNumber As Long
+    Dim columnNumber As Long
+    Dim firstExistingRow As Long
+
+    If destinationLastRow < sourceData.Rows.Count Then Exit Function
+
+    firstExistingRow = destinationLastRow - sourceData.Rows.Count + 1
+    Set existingBlock = destinationSheet.Cells(firstExistingRow, 1).Resize( _
+                            sourceData.Rows.Count, sourceData.Columns.Count)
+
+    sourceValues = sourceData.Value2
+    existingValues = existingBlock.Value2
+
+    If sourceData.Cells.CountLarge = 1 Then
+        BlockAlreadyAtBottom = ValuesMatch(sourceValues, existingValues)
+        Exit Function
+    End If
+
+    For rowNumber = 1 To sourceData.Rows.Count
+        For columnNumber = 1 To sourceData.Columns.Count
+            If Not ValuesMatch(sourceValues(rowNumber, columnNumber), _
+                               existingValues(rowNumber, columnNumber)) Then
+                Exit Function
+            End If
+        Next columnNumber
+    Next rowNumber
+
+    BlockAlreadyAtBottom = True
+End Function
+
+Private Function ValuesMatch(ByVal firstValue As Variant, _
+                             ByVal secondValue As Variant) As Boolean
+    If IsError(firstValue) Or IsError(secondValue) Then
+        ValuesMatch = (IsError(firstValue) And IsError(secondValue))
+    ElseIf IsEmpty(firstValue) And IsEmpty(secondValue) Then
+        ValuesMatch = True
+    Else
+        ValuesMatch = (CStr(firstValue) = CStr(secondValue))
+    End If
 End Function
 
 Private Function LastUsedRow(ByVal ws As Worksheet) As Long
