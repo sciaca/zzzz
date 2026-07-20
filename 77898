@@ -1,0 +1,363 @@
+Option Explicit
+
+Public Sub Load_RT624BS_Differences()
+
+    Const SOURCE_SHEET As String = "Scotia - RT624BSPh160CS"
+    Const LOADER_SHEET As String = "TEMPLATE"
+    Const ENTITY_ID As String = "RT624BS"
+
+    Dim sourceWs As Worksheet
+    Dim loaderWb As Workbook
+    Dim loaderWs As Worksheet
+    Dim loadedCount As Long
+    Dim differenceCount As Long
+    Dim missingMappings As String
+    Dim oldScreenUpdating As Boolean
+    Dim oldEnableEvents As Boolean
+
+    On Error GoTo ErrorHandler
+
+    oldScreenUpdating = Application.ScreenUpdating
+    oldEnableEvents = Application.EnableEvents
+
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+
+    Set sourceWs = ThisWorkbook.Worksheets(SOURCE_SHEET)
+
+    ' Recalculate Difference formulas in column V.
+    ThisWorkbook.Calculate
+    sourceWs.Calculate
+
+    differenceCount = CountDifferenceRows(sourceWs, 3, 14)
+    differenceCount = differenceCount + CountDifferenceRows(sourceWs, 17, 28)
+
+    If differenceCount = 0 Then
+        MsgBox "RT624BS column V has no non-zero differences.", _
+               vbInformation, "PB Loader"
+        GoTo CleanUp
+    End If
+
+    Set loaderWb = FindOrSelectPBLoader()
+
+    If loaderWb Is Nothing Then GoTo CleanUp
+
+    If loaderWb.ReadOnly Then
+        Err.Raise vbObjectError + 1000, , _
+                  "PB Loader workbook is open as read-only."
+    End If
+
+    Set loaderWs = loaderWb.Worksheets(LOADER_SHEET)
+
+    If loaderWs.ProtectContents Then
+        Err.Raise vbObjectError + 1001, , _
+                  "TEMPLATE sheet is protected."
+    End If
+
+    ' Clear old RT624BS amounts from column B.
+    ClearOldRT624BSAmounts loaderWs, ENTITY_ID
+
+    ' PB Interest:
+    ' Currency = S17:S28
+    ' Difference = V17:V28
+    loadedCount = loadedCount + LoadDifferenceGroup( _
+                      sourceWs:=sourceWs, _
+                      loaderWs:=loaderWs, _
+                      firstRow:=17, _
+                      lastRow:=28, _
+                      entityId:=ENTITY_ID, _
+                      annotationText:="PBINTEREST", _
+                      missingMappings:=missingMappings)
+
+    ' Stock Loan:
+    ' Currency = S3:S14
+    ' Difference = V3:V14
+    loadedCount = loadedCount + LoadDifferenceGroup( _
+                      sourceWs:=sourceWs, _
+                      loaderWs:=loaderWs, _
+                      firstRow:=3, _
+                      lastRow:=14, _
+                      entityId:=ENTITY_ID, _
+                      annotationText:="STOCKLOANFEE", _
+                      missingMappings:=missingMappings)
+
+    loaderWs.Calculate
+    loaderWb.Activate
+    loaderWs.Activate
+
+    If Len(missingMappings) = 0 Then
+        MsgBox loadedCount & _
+               " RT624BS differences loaded into PB Loader." & vbCrLf & _
+               "Please review and save the loader.", _
+               vbInformation, "PB Loader"
+    Else
+        MsgBox loadedCount & _
+               " differences loaded." & vbCrLf & vbCrLf & _
+               "These ENTITY/CURRENCY/ANNOTATION rows were not found:" & _
+               vbCrLf & missingMappings, _
+               vbExclamation, "PB Loader"
+    End If
+
+CleanUp:
+
+    Application.EnableEvents = oldEnableEvents
+    Application.ScreenUpdating = oldScreenUpdating
+    Exit Sub
+
+ErrorHandler:
+
+    MsgBox "Loader stopped: " & Err.Description, _
+           vbExclamation, "PB Loader"
+
+    Resume CleanUp
+
+End Sub
+
+
+Private Function LoadDifferenceGroup( _
+    ByVal sourceWs As Worksheet, _
+    ByVal loaderWs As Worksheet, _
+    ByVal firstRow As Long, _
+    ByVal lastRow As Long, _
+    ByVal entityId As String, _
+    ByVal annotationText As String, _
+    ByRef missingMappings As String) As Long
+
+    Dim sourceRow As Long
+    Dim targetRow As Long
+    Dim currencyText As String
+    Dim amountValue As Double
+
+    For sourceRow = firstRow To lastRow
+
+        If TryReadDifference( _
+            sourceWs.Range("V" & sourceRow).Value2, _
+            amountValue) Then
+
+            currencyText = UCase$(Trim$( _
+                           CStr(sourceWs.Range("S" & sourceRow).Value2)))
+
+            If Len(currencyText) = 0 Then
+                Err.Raise vbObjectError + 1010, , _
+                          "Currency is blank in S" & sourceRow
+            End If
+
+            targetRow = FindLoaderRow( _
+                            loaderWs:=loaderWs, _
+                            entityId:=entityId, _
+                            currencyText:=currencyText, _
+                            annotationText:=annotationText)
+
+            If targetRow > 0 Then
+
+                ' PB Loader:
+                ' A = Entity ID
+                ' B = Amount
+                ' C = Currency
+                ' G = Annotation
+                loaderWs.Cells(targetRow, "B").Value2 = amountValue
+                LoadDifferenceGroup = LoadDifferenceGroup + 1
+
+            Else
+
+                missingMappings = missingMappings & _
+                    entityId & " / " & _
+                    currencyText & " / " & _
+                    annotationText & vbCrLf
+
+            End If
+
+        End If
+
+    Next sourceRow
+
+End Function
+
+
+Private Function FindLoaderRow( _
+    ByVal loaderWs As Worksheet, _
+    ByVal entityId As String, _
+    ByVal currencyText As String, _
+    ByVal annotationText As String) As Long
+
+    Dim rowNumber As Long
+    Dim lastRow As Long
+
+    lastRow = loaderWs.Cells( _
+              loaderWs.Rows.Count, "A").End(xlUp).Row
+
+    For rowNumber = 3 To lastRow
+
+        If UCase$(Trim$(CStr( _
+           loaderWs.Cells(rowNumber, "A").Value2))) = _
+           UCase$(entityId) Then
+
+            If UCase$(Trim$(CStr( _
+               loaderWs.Cells(rowNumber, "C").Value2))) = _
+               UCase$(currencyText) Then
+
+                If UCase$(Trim$(CStr( _
+                   loaderWs.Cells(rowNumber, "G").Value2))) = _
+                   UCase$(annotationText) Then
+
+                    FindLoaderRow = rowNumber
+                    Exit Function
+
+                End If
+            End If
+        End If
+
+    Next rowNumber
+
+End Function
+
+
+Private Sub ClearOldRT624BSAmounts( _
+    ByVal loaderWs As Worksheet, _
+    ByVal entityId As String)
+
+    Dim rowNumber As Long
+    Dim lastRow As Long
+    Dim annotationText As String
+
+    lastRow = loaderWs.Cells( _
+              loaderWs.Rows.Count, "A").End(xlUp).Row
+
+    For rowNumber = 3 To lastRow
+
+        If UCase$(Trim$(CStr( _
+           loaderWs.Cells(rowNumber, "A").Value2))) = _
+           UCase$(entityId) Then
+
+            annotationText = UCase$(Trim$(CStr( _
+                             loaderWs.Cells(rowNumber, "G").Value2)))
+
+            If annotationText = "PBINTEREST" Or _
+               annotationText = "STOCKLOANFEE" Then
+
+                loaderWs.Cells(rowNumber, "B").ClearContents
+
+            End If
+
+        End If
+
+    Next rowNumber
+
+End Sub
+
+
+Private Function CountDifferenceRows( _
+    ByVal sourceWs As Worksheet, _
+    ByVal firstRow As Long, _
+    ByVal lastRow As Long) As Long
+
+    Dim rowNumber As Long
+    Dim amountValue As Double
+
+    For rowNumber = firstRow To lastRow
+
+        If TryReadDifference( _
+            sourceWs.Range("V" & rowNumber).Value2, _
+            amountValue) Then
+
+            CountDifferenceRows = CountDifferenceRows + 1
+
+        End If
+
+    Next rowNumber
+
+End Function
+
+
+Private Function TryReadDifference( _
+    ByVal rawValue As Variant, _
+    ByRef amountValue As Double) As Boolean
+
+    Dim textValue As String
+    Dim negativeValue As Boolean
+
+    If IsError(rawValue) Or IsEmpty(rawValue) Then Exit Function
+
+    If IsNumeric(rawValue) Then
+
+        amountValue = Application.WorksheetFunction.Round( _
+                      CDbl(rawValue), 2)
+
+    Else
+
+        textValue = Trim$(CStr(rawValue))
+
+        If Len(textValue) = 0 Or textValue = "-" Then Exit Function
+
+        textValue = Replace(textValue, ",", "")
+        textValue = Replace(textValue, "$", "")
+
+        If Left$(textValue, 1) = "(" And _
+           Right$(textValue, 1) = ")" Then
+
+            negativeValue = True
+            textValue = Mid$(textValue, 2, Len(textValue) - 2)
+
+        End If
+
+        If Not IsNumeric(textValue) Then Exit Function
+
+        amountValue = CDbl(textValue)
+
+        If negativeValue Then amountValue = -amountValue
+
+        amountValue = Application.WorksheetFunction.Round( _
+                      amountValue, 2)
+
+    End If
+
+    ' Ignore zero and values that display as 0.00.
+    If Abs(amountValue) >= 0.01 Then
+        TryReadDifference = True
+    End If
+
+End Function
+
+
+Private Function FindOrSelectPBLoader() As Workbook
+
+    Dim wb As Workbook
+    Dim selectedFile As String
+
+    ' First find an already-open PB Loader.
+    For Each wb In Application.Workbooks
+
+        If InStr(1, wb.Name, _
+           "PB loader template", vbTextCompare) > 0 Then
+
+            Set FindOrSelectPBLoader = wb
+            Exit Function
+
+        End If
+
+    Next wb
+
+    ' Otherwise ask the user to select it.
+    With Application.FileDialog(3)
+
+        .Title = "Select PB loader template workbook"
+        .AllowMultiSelect = False
+        .Filters.Clear
+        .Filters.Add "Excel Workbooks", _
+                     "*.xlsx;*.xls;*.xlsm;*.xlsb"
+
+        If .Show = -1 Then
+            selectedFile = .SelectedItems(1)
+        Else
+            Exit Function
+        End If
+
+    End With
+
+    Set FindOrSelectPBLoader = Workbooks.Open( _
+        Filename:=selectedFile, _
+        UpdateLinks:=0, _
+        ReadOnly:=False, _
+        AddToMru:=False)
+
+End Function
