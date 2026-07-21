@@ -1,7 +1,215 @@
 Option Explicit
 
-Public Sub Load_RT624BS_Differences()
+' Source reports dated on the previous business day.
+Private Const DEST_RGA_LIE As String = "rga_YYYYMMDD_lie TOD"
+Private Const DEST_RGA_ABV As String = "RGA0300_YYYYMMDD_ABV TOD"
+Private Const DEST_RBC_INTAM As String = "rbc_YYYYMMDD_intam"
+Private Const DEST_RBC_SLFSM As String = "rbc_YYYYMMDD_slfsm TOD"
+Private Const DEST_PHN_INTAM As String = "phn_YYYYMMDD_intam"
+Private Const DEST_PHN_SLFSM As String = "phn_YYYYMMDD_slfsm TOD"
 
+' Source report dated today and appended as history.
+Private Const DEST_SHORT_STOCK As String = "YYYYMMDD_SHORT_STOCK_DETAIL"
+Private Const DEST_PHN160_INTEREST As String = "PHN160BS - interest"
+Private Const DEST_TD_INTEREST As String = "TD Interest"
+Private Const DEST_STOCKLOAN_TOD As String = "Stockloan-TOD"
+
+Public Sub Import_All_PB_Reports()
+    Const REPORT_COUNT As Long = 10
+
+    Dim hostWb As Workbook
+    Dim targets(1 To REPORT_COUNT) As Worksheet
+    Dim labels(1 To REPORT_COUNT) As String
+    Dim masks(1 To REPORT_COUNT) As String
+    Dim targetNames(1 To REPORT_COUNT) As String
+    Dim reportFiles(1 To REPORT_COUNT) As String
+    Dim results(1 To REPORT_COUNT) As String
+    Dim appendMode(1 To REPORT_COUNT) As Boolean
+    Dim sourceRowsToSkip(1 To REPORT_COUNT) As Long
+    Dim addCurrencyCodes(1 To REPORT_COUNT) As Boolean
+    Dim shortStockFiles As Collection
+
+    Dim downloadFolder As String
+    Dim expectedPreviousDate As String
+    Dim previousReportDate As String
+    Dim previousReportDateUS As String
+    Dim todayReportDate As String
+    Dim i As Long
+    Dim summaryText As String
+
+    Dim oldCalculation As XlCalculation
+    Dim oldScreenUpdating As Boolean
+    Dim oldEnableEvents As Boolean
+    Dim oldDisplayAlerts As Boolean
+    Dim oldAutomationSecurity As Long
+    Dim settingsChanged As Boolean
+    Dim completed As Boolean
+    Dim errorText As String
+
+    On Error GoTo ImportFailed
+
+    Set hostWb = ThisWorkbook
+    downloadFolder = Environ$("USERPROFILE") & "\Downloads\"
+    If Not FolderExists(downloadFolder) Then
+        downloadFolder = hostWb.Path & Application.PathSeparator
+    End If
+
+    expectedPreviousDate = Format$(PreviousCanadianBusinessDay(Date), "yyyymmdd")
+    todayReportDate = Format$(Date, "yyyymmdd")
+
+    labels(1) = "RGA LIE"
+    masks(1) = "rga_" & expectedPreviousDate & "_lie.*"
+    targetNames(1) = DEST_RGA_LIE
+
+    ' Resolve LIE first. Its date becomes the common date for RGA/RBC/PHN.
+    reportFiles(1) = ResolveReport(downloadFolder, masks(1), labels(1), expectedPreviousDate)
+    If Len(reportFiles(1)) = 0 Then Exit Sub
+
+    previousReportDate = ExtractReportDate(reportFiles(1))
+    If Len(previousReportDate) = 0 Then
+        Err.Raise vbObjectError + 2001, "Import_All_PB_Reports", _
+                  "No YYYYMMDD date was found in: " & FileNameOnly(reportFiles(1))
+    End If
+
+    previousReportDateUS = YYYYMMDDToMMDDYYYY(previousReportDate)
+
+    labels(2) = "RGA ABV"
+    masks(2) = "rga0300_" & previousReportDate & "_abv.*"
+    targetNames(2) = DEST_RGA_ABV
+
+    labels(3) = "RBC INTAM"
+    masks(3) = "rbc90050_" & previousReportDate & "_intam.*"
+    targetNames(3) = DEST_RBC_INTAM
+
+    labels(4) = "RBC SLFSM TOD"
+    masks(4) = "rbc90050_" & previousReportDate & "_slfsm.*"
+    targetNames(4) = DEST_RBC_SLFSM
+
+    labels(5) = "PHN INTAM"
+    masks(5) = "phn01226_" & previousReportDate & "_intam.*"
+    targetNames(5) = DEST_PHN_INTAM
+
+    labels(6) = "PHN SLFSM TOD"
+    masks(6) = "phn01226_" & previousReportDate & "_slfsm.*"
+    targetNames(6) = DEST_PHN_SLFSM
+
+    labels(7) = "SHORT STOCK DETAIL"
+    masks(7) = todayReportDate & "_SHORT_STOCK_DETAIL*.*"
+    targetNames(7) = DEST_SHORT_STOCK
+    appendMode(7) = True
+    sourceRowsToSkip(7) = 1
+
+    labels(8) = "PHN160BS INTEREST"
+    masks(8) = "mtd_interest_report_" & Format$(Date, "mm_dd_yyyy") & "*.*"
+    targetNames(8) = DEST_PHN160_INTEREST
+    sourceRowsToSkip(8) = 2
+    addCurrencyCodes(8) = True
+
+    labels(9) = "TD INTEREST"
+    masks(9) = "finance_" & previousReportDateUS & ".*"
+    targetNames(9) = DEST_TD_INTEREST
+
+    labels(10) = "STOCKLOAN TOD"
+    masks(10) = "loanfees_" & previousReportDateUS & ".*"
+    targetNames(10) = DEST_STOCKLOAN_TOD
+
+    ' Tuesday can contain the base SHORT STOCK file plus (1), (2), etc.
+    Set shortStockFiles = FindAllNumberedReports(downloadFolder, masks(7))
+    If shortStockFiles.Count = 0 Then
+        reportFiles(7) = PickReport(downloadFolder, _
+                                   "Select SHORT STOCK DETAIL report for " & todayReportDate)
+        If Len(reportFiles(7)) = 0 Then Exit Sub
+        shortStockFiles.Add reportFiles(7)
+    Else
+        reportFiles(7) = CStr(shortStockFiles(1))
+    End If
+
+    ' Locate every source before changing any destination tab.
+    For i = 2 To REPORT_COUNT
+        If i <> 7 Then
+            If i <= 6 Or i >= 9 Then
+                reportFiles(i) = ResolveReport(downloadFolder, masks(i), labels(i), previousReportDate)
+            Else
+                reportFiles(i) = ResolveReport(downloadFolder, masks(i), labels(i), todayReportDate)
+            End If
+        End If
+
+        If Len(reportFiles(i)) = 0 Then Exit Sub
+    Next i
+
+    ' Confirm all destination tabs before importing.
+    For i = 1 To REPORT_COUNT
+        Set targets(i) = GetWorksheetFlexible(hostWb, targetNames(i))
+        If targets(i) Is Nothing Then
+            Err.Raise vbObjectError + 2002, "Import_All_PB_Reports", _
+                      "Destination tab not found: " & targetNames(i)
+        End If
+    Next i
+
+    oldCalculation = Application.Calculation
+    oldScreenUpdating = Application.ScreenUpdating
+    oldEnableEvents = Application.EnableEvents
+    oldDisplayAlerts = Application.DisplayAlerts
+    oldAutomationSecurity = Application.AutomationSecurity
+    settingsChanged = True
+
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.DisplayAlerts = False
+    Application.Calculation = xlCalculationManual
+    Application.AutomationSecurity = 3
+
+    For i = 1 To REPORT_COUNT
+        Application.StatusBar = "Importing " & labels(i) & " (" & i & "/" & REPORT_COUNT & ")..."
+        If i = 7 Then
+            results(i) = ImportShortStockBatch(shortStockFiles, targets(i))
+        Else
+            results(i) = ImportOneReport(reportFiles(i), targets(i), _
+                                         appendMode(i), sourceRowsToSkip(i), _
+                                         addCurrencyCodes(i))
+        End If
+    Next i
+
+    completed = True
+
+CleanUp:
+    On Error Resume Next
+    Application.CutCopyMode = False
+
+    If settingsChanged Then
+        Application.AutomationSecurity = oldAutomationSecurity
+        Application.Calculation = oldCalculation
+        Application.DisplayAlerts = oldDisplayAlerts
+        Application.EnableEvents = oldEnableEvents
+        Application.ScreenUpdating = oldScreenUpdating
+    End If
+
+    Application.StatusBar = False
+    On Error GoTo 0
+
+    If completed Then
+        summaryText = "Import completed." & vbCrLf & _
+                      "Previous-business-day reports: " & previousReportDate & vbCrLf & _
+                      "Same-day reports: " & todayReportDate & vbCrLf & vbCrLf
+
+        For i = 1 To REPORT_COUNT
+            summaryText = summaryText & labels(i) & " -> " & _
+                          targets(i).Name & " (" & results(i) & ")" & vbCrLf
+        Next i
+
+        MsgBox summaryText, vbInformation, "PB Summary import"
+    ElseIf Len(errorText) > 0 Then
+        MsgBox errorText, vbExclamation, "PB Summary import"
+    End If
+
+    Exit Sub
+
+ImportFailed:
+    errorText = "Import stopped: " & Err.Description
+    Resume CleanUp
+End Sub
+
+Public Sub Build_RT624BS_Difference_Loader()
     Const SOURCE_SHEET As String = "Scotia - RT624BSPh160CS"
     Const LOADER_SHEET As String = "TEMPLATE"
     Const ENTITY_ID As String = "RT624BS"
@@ -9,355 +217,1127 @@ Public Sub Load_RT624BS_Differences()
     Dim sourceWs As Worksheet
     Dim loaderWb As Workbook
     Dim loaderWs As Worksheet
-    Dim loadedCount As Long
-    Dim differenceCount As Long
-    Dim missingMappings As String
+    Dim entryCurrencies As Collection
+    Dim entryAmounts As Collection
+    Dim entryTypes As Collection
+
+    Dim headerRow As Long
+    Dim entityColumn As Long
+    Dim amountColumn As Long
+    Dim currencyColumn As Long
+    Dim annotationColumn As Long
+    Dim loaderRow As Long
+    Dim i As Long
+    Dim errorText As String
+
     Dim oldScreenUpdating As Boolean
     Dim oldEnableEvents As Boolean
+    Dim oldDisplayAlerts As Boolean
+    Dim settingsChanged As Boolean
 
-    On Error GoTo ErrorHandler
+    On Error GoTo LoaderFailed
 
-    oldScreenUpdating = Application.ScreenUpdating
-    oldEnableEvents = Application.EnableEvents
-
-    Application.ScreenUpdating = False
-    Application.EnableEvents = False
-
-    Set sourceWs = ThisWorkbook.Worksheets(SOURCE_SHEET)
-
-    ' Recalculate Difference formulas in column V.
-    ThisWorkbook.Calculate
-    sourceWs.Calculate
-
-    differenceCount = CountDifferenceRows(sourceWs, 3, 14)
-    differenceCount = differenceCount + CountDifferenceRows(sourceWs, 17, 28)
-
-    If differenceCount = 0 Then
-        MsgBox "RT624BS column V has no non-zero differences.", _
-               vbInformation, "PB Loader"
-        GoTo CleanUp
+    Set sourceWs = GetWorksheetFlexible(ThisWorkbook, SOURCE_SHEET)
+    If sourceWs Is Nothing Then
+        Err.Raise vbObjectError + 2100, "Build_RT624BS_Difference_Loader", _
+                  "Source tab not found: " & SOURCE_SHEET
     End If
 
-    Set loaderWb = FindOrSelectPBLoader()
+    ThisWorkbook.Calculate
 
-    If loaderWb Is Nothing Then GoTo CleanUp
+    Set entryCurrencies = New Collection
+    Set entryAmounts = New Collection
+    Set entryTypes = New Collection
+
+    ' Keep the same output order shown in the PB Loader template.
+    CollectDifferenceEntries sourceWs, 17, 28, "PBINTEREST", _
+                             entryCurrencies, entryAmounts, entryTypes
+    CollectDifferenceEntries sourceWs, 3, 14, "STOCKLOANFEE", _
+                             entryCurrencies, entryAmounts, entryTypes
+
+    If entryAmounts.Count = 0 Then
+        MsgBox "RT624BS has no non-zero differences in V3:V14 or V17:V28.", _
+               vbInformation, "PB Loader"
+        Exit Sub
+    End If
+
+    Set loaderWb = FindOrOpenPBLoaderWorkbook()
+    If loaderWb Is Nothing Then Exit Sub
 
     If loaderWb.ReadOnly Then
-        Err.Raise vbObjectError + 1000, , _
+        Err.Raise vbObjectError + 2101, "Build_RT624BS_Difference_Loader", _
                   "PB Loader workbook is open as read-only."
     End If
 
-    Set loaderWs = loaderWb.Worksheets(LOADER_SHEET)
+    Set loaderWs = GetWorksheetFlexible(loaderWb, LOADER_SHEET)
+    If loaderWs Is Nothing Then
+        Err.Raise vbObjectError + 2102, "Build_RT624BS_Difference_Loader", _
+                  "Loader tab not found: " & LOADER_SHEET
+    End If
 
     If loaderWs.ProtectContents Then
-        Err.Raise vbObjectError + 1001, , _
-                  "TEMPLATE sheet is protected."
+        Err.Raise vbObjectError + 2103, "Build_RT624BS_Difference_Loader", _
+                  "Loader tab is protected: " & loaderWs.Name
     End If
 
-    ' Clear old RT624BS amounts from column B.
-    ClearOldRT624BSAmounts loaderWs, ENTITY_ID
+    headerRow = FindLoaderHeaderRow(loaderWs)
+    If headerRow = 0 Then
+        Err.Raise vbObjectError + 2104, "Build_RT624BS_Difference_Loader", _
+                  "ENTITY ID / AMOUNT / CURRENCY / ANNOTATION headers were not found."
+    End If
 
-    ' PB Interest:
-    ' Currency = S17:S28
-    ' Difference = V17:V28
-    loadedCount = loadedCount + LoadDifferenceGroup( _
-                      sourceWs:=sourceWs, _
-                      loaderWs:=loaderWs, _
-                      firstRow:=17, _
-                      lastRow:=28, _
-                      entityId:=ENTITY_ID, _
-                      annotationText:="PBINTEREST", _
-                      missingMappings:=missingMappings)
+    entityColumn = FindHeaderColumnByToken(loaderWs, headerRow, "entityid")
+    amountColumn = FindHeaderColumnByToken(loaderWs, headerRow, "amount")
+    currencyColumn = FindHeaderColumnByToken(loaderWs, headerRow, "currency")
+    annotationColumn = FindHeaderColumnByToken(loaderWs, headerRow, "annotation")
 
-    ' Stock Loan:
-    ' Currency = S3:S14
-    ' Difference = V3:V14
-    loadedCount = loadedCount + LoadDifferenceGroup( _
-                      sourceWs:=sourceWs, _
-                      loaderWs:=loaderWs, _
-                      firstRow:=3, _
-                      lastRow:=14, _
-                      entityId:=ENTITY_ID, _
-                      annotationText:="STOCKLOANFEE", _
-                      missingMappings:=missingMappings)
+    If FindFirstEntityRow(loaderWs, headerRow, entityColumn, ENTITY_ID) = 0 Then
+        Err.Raise vbObjectError + 2105, "Build_RT624BS_Difference_Loader", _
+                  "RT624BS entity block was not found in the PB Loader template."
+    End If
+
+    oldScreenUpdating = Application.ScreenUpdating
+    oldEnableEvents = Application.EnableEvents
+    oldDisplayAlerts = Application.DisplayAlerts
+    settingsChanged = True
+
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.DisplayAlerts = False
+
+    ClearEntityDifferenceAmounts loaderWs, headerRow, entityColumn, _
+                                 amountColumn, annotationColumn, ENTITY_ID
+
+    For i = 1 To entryAmounts.Count
+        loaderRow = FindLoaderMatchRow(loaderWs, headerRow, _
+                                       entityColumn, currencyColumn, annotationColumn, _
+                                       ENTITY_ID, CStr(entryCurrencies(i)), _
+                                       CStr(entryTypes(i)))
+
+        If loaderRow = 0 Then
+            loaderRow = CreateLoaderMatchRow(loaderWs, headerRow, _
+                                              entityColumn, amountColumn, _
+                                              currencyColumn, annotationColumn, _
+                                              ENTITY_ID, CStr(entryCurrencies(i)), _
+                                              CStr(entryTypes(i)))
+        End If
+
+        loaderWs.Cells(loaderRow, amountColumn).Value2 = CDbl(entryAmounts(i))
+    Next i
+
+    DeleteUnusedEntityRows loaderWs, headerRow, entityColumn, _
+                           amountColumn, annotationColumn, ENTITY_ID
 
     loaderWs.Calculate
-    loaderWb.Activate
-    loaderWs.Activate
 
-    If Len(missingMappings) = 0 Then
-        MsgBox loadedCount & _
-               " RT624BS differences loaded into PB Loader." & vbCrLf & _
-               "Please review and save the loader.", _
+LoaderCleanUp:
+    On Error Resume Next
+    Application.CutCopyMode = False
+    If settingsChanged Then
+        Application.DisplayAlerts = oldDisplayAlerts
+        Application.EnableEvents = oldEnableEvents
+        Application.ScreenUpdating = oldScreenUpdating
+    End If
+    On Error GoTo 0
+
+    If Len(errorText) > 0 Then
+        MsgBox errorText, vbExclamation, "PB Loader"
+    ElseIf Not loaderWb Is Nothing Then
+        MsgBox entryAmounts.Count & " RT624BS differences loaded into " & _
+               loaderWb.Name & " / " & loaderWs.Name & "." & vbCrLf & _
+               "Review the loader and save it when ready.", _
                vbInformation, "PB Loader"
-    Else
-        MsgBox loadedCount & _
-               " differences loaded." & vbCrLf & vbCrLf & _
-               "These ENTITY/CURRENCY/ANNOTATION rows were not found:" & _
-               vbCrLf & missingMappings, _
-               vbExclamation, "PB Loader"
     End If
 
-CleanUp:
-
-    Application.EnableEvents = oldEnableEvents
-    Application.ScreenUpdating = oldScreenUpdating
     Exit Sub
 
-ErrorHandler:
-
-    MsgBox "Loader stopped: " & Err.Description, _
-           vbExclamation, "PB Loader"
-
-    Resume CleanUp
-
+LoaderFailed:
+    errorText = "Loader stopped: " & Err.Description
+    Resume LoaderCleanUp
 End Sub
 
-
-Private Function LoadDifferenceGroup( _
-    ByVal sourceWs As Worksheet, _
-    ByVal loaderWs As Worksheet, _
-    ByVal firstRow As Long, _
-    ByVal lastRow As Long, _
-    ByVal entityId As String, _
-    ByVal annotationText As String, _
-    ByRef missingMappings As String) As Long
-
-    Dim sourceRow As Long
-    Dim targetRow As Long
+Private Sub CollectDifferenceEntries(ByVal sourceWs As Worksheet, _
+                                     ByVal firstRow As Long, _
+                                     ByVal lastRow As Long, _
+                                     ByVal annotationText As String, _
+                                     ByVal currencies As Collection, _
+                                     ByVal amounts As Collection, _
+                                     ByVal annotations As Collection)
+    Dim rowNumber As Long
     Dim currencyText As String
     Dim amountValue As Double
 
-    For sourceRow = firstRow To lastRow
-
-        If TryReadDifference( _
-            sourceWs.Range("V" & sourceRow).Value2, _
-            amountValue) Then
-
-            currencyText = UCase$(Trim$( _
-                           CStr(sourceWs.Range("S" & sourceRow).Value2)))
+    For rowNumber = firstRow To lastRow
+        If TryGetDifferenceAmount(sourceWs.Range("V" & rowNumber).Value2, amountValue) Then
+            currencyText = UCase$(Trim$(CStr(sourceWs.Range("S" & rowNumber).Value2)))
 
             If Len(currencyText) = 0 Then
-                Err.Raise vbObjectError + 1010, , _
-                          "Currency is blank in S" & sourceRow
+                Err.Raise vbObjectError + 2110, "CollectDifferenceEntries", _
+                          "Currency is blank in S" & rowNumber & "."
             End If
 
-            targetRow = FindLoaderRow( _
-                            loaderWs:=loaderWs, _
-                            entityId:=entityId, _
-                            currencyText:=currencyText, _
-                            annotationText:=annotationText)
-
-            If targetRow > 0 Then
-
-                ' PB Loader:
-                ' A = Entity ID
-                ' B = Amount
-                ' C = Currency
-                ' G = Annotation
-                loaderWs.Cells(targetRow, "B").Value2 = amountValue
-                LoadDifferenceGroup = LoadDifferenceGroup + 1
-
-            Else
-
-                missingMappings = missingMappings & _
-                    entityId & " / " & _
-                    currencyText & " / " & _
-                    annotationText & vbCrLf
-
-            End If
-
+            currencies.Add currencyText
+            amounts.Add amountValue
+            annotations.Add annotationText
         End If
-
-    Next sourceRow
-
-End Function
-
-
-Private Function FindLoaderRow( _
-    ByVal loaderWs As Worksheet, _
-    ByVal entityId As String, _
-    ByVal currencyText As String, _
-    ByVal annotationText As String) As Long
-
-    Dim rowNumber As Long
-    Dim lastRow As Long
-
-    lastRow = loaderWs.Cells( _
-              loaderWs.Rows.Count, "A").End(xlUp).Row
-
-    For rowNumber = 3 To lastRow
-
-        If UCase$(Trim$(CStr( _
-           loaderWs.Cells(rowNumber, "A").Value2))) = _
-           UCase$(entityId) Then
-
-            If UCase$(Trim$(CStr( _
-               loaderWs.Cells(rowNumber, "C").Value2))) = _
-               UCase$(currencyText) Then
-
-                If UCase$(Trim$(CStr( _
-                   loaderWs.Cells(rowNumber, "G").Value2))) = _
-                   UCase$(annotationText) Then
-
-                    FindLoaderRow = rowNumber
-                    Exit Function
-
-                End If
-            End If
-        End If
-
     Next rowNumber
-
-End Function
-
-
-Private Sub ClearOldRT624BSAmounts( _
-    ByVal loaderWs As Worksheet, _
-    ByVal entityId As String)
-
-    Dim rowNumber As Long
-    Dim lastRow As Long
-    Dim annotationText As String
-
-    lastRow = loaderWs.Cells( _
-              loaderWs.Rows.Count, "A").End(xlUp).Row
-
-    For rowNumber = 3 To lastRow
-
-        If UCase$(Trim$(CStr( _
-           loaderWs.Cells(rowNumber, "A").Value2))) = _
-           UCase$(entityId) Then
-
-            annotationText = UCase$(Trim$(CStr( _
-                             loaderWs.Cells(rowNumber, "G").Value2)))
-
-            If annotationText = "PBINTEREST" Or _
-               annotationText = "STOCKLOANFEE" Then
-
-                loaderWs.Cells(rowNumber, "B").ClearContents
-
-            End If
-
-        End If
-
-    Next rowNumber
-
 End Sub
 
-
-Private Function CountDifferenceRows( _
-    ByVal sourceWs As Worksheet, _
-    ByVal firstRow As Long, _
-    ByVal lastRow As Long) As Long
-
-    Dim rowNumber As Long
-    Dim amountValue As Double
-
-    For rowNumber = firstRow To lastRow
-
-        If TryReadDifference( _
-            sourceWs.Range("V" & rowNumber).Value2, _
-            amountValue) Then
-
-            CountDifferenceRows = CountDifferenceRows + 1
-
-        End If
-
-    Next rowNumber
-
-End Function
-
-
-Private Function TryReadDifference( _
-    ByVal rawValue As Variant, _
-    ByRef amountValue As Double) As Boolean
-
+Private Function TryGetDifferenceAmount(ByVal rawValue As Variant, _
+                                        ByRef amountValue As Double) As Boolean
     Dim textValue As String
-    Dim negativeValue As Boolean
+    Dim isNegative As Boolean
 
     If IsError(rawValue) Or IsEmpty(rawValue) Then Exit Function
 
     If IsNumeric(rawValue) Then
-
-        amountValue = Application.WorksheetFunction.Round( _
-                      CDbl(rawValue), 2)
-
+        amountValue = Application.WorksheetFunction.Round(CDbl(rawValue), 2)
     Else
-
         textValue = Trim$(CStr(rawValue))
-
         If Len(textValue) = 0 Or textValue = "-" Then Exit Function
 
         textValue = Replace(textValue, ",", "")
         textValue = Replace(textValue, "$", "")
 
-        If Left$(textValue, 1) = "(" And _
-           Right$(textValue, 1) = ")" Then
-
-            negativeValue = True
+        If Left$(textValue, 1) = "(" And Right$(textValue, 1) = ")" Then
+            isNegative = True
             textValue = Mid$(textValue, 2, Len(textValue) - 2)
-
         End If
 
         If Not IsNumeric(textValue) Then Exit Function
-
         amountValue = CDbl(textValue)
-
-        If negativeValue Then amountValue = -amountValue
-
-        amountValue = Application.WorksheetFunction.Round( _
-                      amountValue, 2)
-
+        If isNegative Then amountValue = -amountValue
+        amountValue = Application.WorksheetFunction.Round(amountValue, 2)
     End If
 
-    ' Ignore zero and values that display as 0.00.
-    If Abs(amountValue) >= 0.01 Then
-        TryReadDifference = True
-    End If
-
+    If Abs(amountValue) >= 0.01 Then TryGetDifferenceAmount = True
 End Function
 
-
-Private Function FindOrSelectPBLoader() As Workbook
-
+Private Function FindOrOpenPBLoaderWorkbook() As Workbook
     Dim wb As Workbook
-    Dim selectedFile As String
+    Dim selectedPath As String
+    Dim initialFolder As String
 
-    ' First find an already-open PB Loader.
     For Each wb In Application.Workbooks
-
-        If InStr(1, wb.Name, _
-           "PB loader template", vbTextCompare) > 0 Then
-
-            Set FindOrSelectPBLoader = wb
+        If InStr(1, LCase$(wb.Name), "pb loader template", vbTextCompare) > 0 Then
+            Set FindOrOpenPBLoaderWorkbook = wb
             Exit Function
-
         End If
-
     Next wb
 
-    ' Otherwise ask the user to select it.
+    initialFolder = ThisWorkbook.Path
+    If Len(initialFolder) > 0 Then initialFolder = initialFolder & Application.PathSeparator
+
+    selectedPath = PickWorkbookFile(initialFolder, "Select PB loader template workbook")
+    If Len(selectedPath) = 0 Then Exit Function
+
+    Set FindOrOpenPBLoaderWorkbook = Workbooks.Open( _
+        Filename:=selectedPath, UpdateLinks:=0, ReadOnly:=False, AddToMru:=False)
+End Function
+
+Private Function PickWorkbookFile(ByVal initialFolder As String, _
+                                  ByVal dialogTitle As String) As String
     With Application.FileDialog(3)
-
-        .Title = "Select PB loader template workbook"
+        .Title = dialogTitle
         .AllowMultiSelect = False
+        .InitialFileName = initialFolder
         .Filters.Clear
-        .Filters.Add "Excel Workbooks", _
-                     "*.xlsx;*.xls;*.xlsm;*.xlsb"
+        .Filters.Add "Excel workbooks", "*.xlsx;*.xls;*.xlsm;*.xlsb"
+        If .Show = -1 Then PickWorkbookFile = .SelectedItems(1)
+    End With
+End Function
 
-        If .Show = -1 Then
-            selectedFile = .SelectedItems(1)
-        Else
+Private Function FindLoaderHeaderRow(ByVal ws As Worksheet) As Long
+    Dim rowNumber As Long
+
+    For rowNumber = 1 To 20
+        If FindHeaderColumnByToken(ws, rowNumber, "entityid") > 0 _
+           And FindHeaderColumnByToken(ws, rowNumber, "amount") > 0 _
+           And FindHeaderColumnByToken(ws, rowNumber, "currency") > 0 _
+           And FindHeaderColumnByToken(ws, rowNumber, "annotation") > 0 Then
+            FindLoaderHeaderRow = rowNumber
+            Exit Function
+        End If
+    Next rowNumber
+End Function
+
+Private Function FindHeaderColumnByToken(ByVal ws As Worksheet, _
+                                         ByVal headerRow As Long, _
+                                         ByVal searchToken As String) As Long
+    Dim lastColumn As Long
+    Dim columnNumber As Long
+    Dim normalizedText As String
+
+    lastColumn = ws.Cells(headerRow, ws.Columns.Count).End(xlToLeft).Column
+
+    For columnNumber = 1 To lastColumn
+        If Not IsError(ws.Cells(headerRow, columnNumber).Value2) Then
+            normalizedText = NormalizeLoaderText(CStr(ws.Cells(headerRow, columnNumber).Value2))
+            If InStr(1, normalizedText, searchToken, vbTextCompare) > 0 Then
+                FindHeaderColumnByToken = columnNumber
+                Exit Function
+            End If
+        End If
+    Next columnNumber
+End Function
+
+Private Function NormalizeLoaderText(ByVal textValue As String) As String
+    Dim result As String
+
+    result = LCase$(Trim$(textValue))
+    result = Replace(result, " ", "")
+    result = Replace(result, "_", "")
+    result = Replace(result, "-", "")
+    result = Replace(result, "(", "")
+    result = Replace(result, ")", "")
+    result = Replace(result, "/", "")
+    NormalizeLoaderText = result
+End Function
+
+Private Function FindFirstEntityRow(ByVal ws As Worksheet, _
+                                    ByVal headerRow As Long, _
+                                    ByVal entityColumn As Long, _
+                                    ByVal entityId As String) As Long
+    Dim rowNumber As Long
+    Dim finalRow As Long
+
+    finalRow = LastUsedRow(ws)
+    For rowNumber = headerRow + 1 To finalRow
+        If UCase$(Trim$(CStr(ws.Cells(rowNumber, entityColumn).Value2))) = UCase$(entityId) Then
+            FindFirstEntityRow = rowNumber
+            Exit Function
+        End If
+    Next rowNumber
+End Function
+
+Private Function FindLastEntityRow(ByVal ws As Worksheet, _
+                                   ByVal headerRow As Long, _
+                                   ByVal entityColumn As Long, _
+                                   ByVal entityId As String) As Long
+    Dim rowNumber As Long
+
+    For rowNumber = LastUsedRow(ws) To headerRow + 1 Step -1
+        If UCase$(Trim$(CStr(ws.Cells(rowNumber, entityColumn).Value2))) = UCase$(entityId) Then
+            FindLastEntityRow = rowNumber
+            Exit Function
+        End If
+    Next rowNumber
+End Function
+
+Private Sub ClearEntityDifferenceAmounts(ByVal ws As Worksheet, _
+                                         ByVal headerRow As Long, _
+                                         ByVal entityColumn As Long, _
+                                         ByVal amountColumn As Long, _
+                                         ByVal annotationColumn As Long, _
+                                         ByVal entityId As String)
+    Dim rowNumber As Long
+    Dim annotationText As String
+
+    For rowNumber = headerRow + 1 To LastUsedRow(ws)
+        If UCase$(Trim$(CStr(ws.Cells(rowNumber, entityColumn).Value2))) = UCase$(entityId) Then
+            annotationText = UCase$(Trim$(CStr(ws.Cells(rowNumber, annotationColumn).Value2)))
+            If annotationText = "PBINTEREST" Or annotationText = "STOCKLOANFEE" Then
+                ws.Cells(rowNumber, amountColumn).ClearContents
+            End If
+        End If
+    Next rowNumber
+End Sub
+
+Private Function FindLoaderMatchRow(ByVal ws As Worksheet, _
+                                    ByVal headerRow As Long, _
+                                    ByVal entityColumn As Long, _
+                                    ByVal currencyColumn As Long, _
+                                    ByVal annotationColumn As Long, _
+                                    ByVal entityId As String, _
+                                    ByVal currencyText As String, _
+                                    ByVal annotationText As String) As Long
+    Dim rowNumber As Long
+
+    For rowNumber = headerRow + 1 To LastUsedRow(ws)
+        If UCase$(Trim$(CStr(ws.Cells(rowNumber, entityColumn).Value2))) = UCase$(entityId) _
+           And UCase$(Trim$(CStr(ws.Cells(rowNumber, currencyColumn).Value2))) = UCase$(currencyText) _
+           And UCase$(Trim$(CStr(ws.Cells(rowNumber, annotationColumn).Value2))) = UCase$(annotationText) Then
+            FindLoaderMatchRow = rowNumber
+            Exit Function
+        End If
+    Next rowNumber
+End Function
+
+Private Function CreateLoaderMatchRow(ByVal ws As Worksheet, _
+                                      ByVal headerRow As Long, _
+                                      ByVal entityColumn As Long, _
+                                      ByVal amountColumn As Long, _
+                                      ByVal currencyColumn As Long, _
+                                      ByVal annotationColumn As Long, _
+                                      ByVal entityId As String, _
+                                      ByVal currencyText As String, _
+                                      ByVal annotationText As String) As Long
+    Dim prototypeRow As Long
+    Dim insertRow As Long
+    Dim lastColumn As Long
+
+    prototypeRow = FindPrototypeLoaderRow(ws, headerRow, entityColumn, _
+                                          annotationColumn, entityId, annotationText)
+    If prototypeRow = 0 Then
+        prototypeRow = FindFirstEntityRow(ws, headerRow, entityColumn, entityId)
+    End If
+
+    If prototypeRow = 0 Then
+        Err.Raise vbObjectError + 2120, "CreateLoaderMatchRow", _
+                  "No RT624BS prototype row is available in the loader."
+    End If
+
+    insertRow = FindLastEntityRow(ws, headerRow, entityColumn, entityId) + 1
+    ws.Rows(insertRow).Insert Shift:=xlDown, CopyOrigin:=xlFormatFromLeftOrAbove
+
+    lastColumn = LastUsedColumn(ws)
+    ws.Range(ws.Cells(prototypeRow, 1), ws.Cells(prototypeRow, lastColumn)).Copy
+    ws.Cells(insertRow, 1).PasteSpecial Paste:=xlPasteAll
+    Application.CutCopyMode = False
+
+    ws.Cells(insertRow, entityColumn).Value2 = entityId
+    ws.Cells(insertRow, amountColumn).ClearContents
+    ws.Cells(insertRow, currencyColumn).Value2 = currencyText
+    ws.Cells(insertRow, annotationColumn).Value2 = annotationText
+
+    CreateLoaderMatchRow = insertRow
+End Function
+
+Private Function FindPrototypeLoaderRow(ByVal ws As Worksheet, _
+                                        ByVal headerRow As Long, _
+                                        ByVal entityColumn As Long, _
+                                        ByVal annotationColumn As Long, _
+                                        ByVal entityId As String, _
+                                        ByVal annotationText As String) As Long
+    Dim rowNumber As Long
+
+    For rowNumber = headerRow + 1 To LastUsedRow(ws)
+        If UCase$(Trim$(CStr(ws.Cells(rowNumber, entityColumn).Value2))) = UCase$(entityId) _
+           And UCase$(Trim$(CStr(ws.Cells(rowNumber, annotationColumn).Value2))) = UCase$(annotationText) Then
+            FindPrototypeLoaderRow = rowNumber
+            Exit Function
+        End If
+    Next rowNumber
+End Function
+
+Private Sub DeleteUnusedEntityRows(ByVal ws As Worksheet, _
+                                   ByVal headerRow As Long, _
+                                   ByVal entityColumn As Long, _
+                                   ByVal amountColumn As Long, _
+                                   ByVal annotationColumn As Long, _
+                                   ByVal entityId As String)
+    Dim rowNumber As Long
+    Dim annotationText As String
+
+    For rowNumber = LastUsedRow(ws) To headerRow + 1 Step -1
+        If UCase$(Trim$(CStr(ws.Cells(rowNumber, entityColumn).Value2))) = UCase$(entityId) Then
+            annotationText = UCase$(Trim$(CStr(ws.Cells(rowNumber, annotationColumn).Value2)))
+
+            If (annotationText = "PBINTEREST" Or annotationText = "STOCKLOANFEE") _
+               And Len(Trim$(CStr(ws.Cells(rowNumber, amountColumn).Value2))) = 0 Then
+                ws.Rows(rowNumber).Delete
+            End If
+        End If
+    Next rowNumber
+End Sub
+
+Private Function LastUsedColumn(ByVal ws As Worksheet) As Long
+    Dim lastCell As Range
+
+    Set lastCell = ws.Cells.Find(What:="*", _
+                                 After:=ws.Cells(1, 1), _
+                                 LookIn:=xlFormulas, _
+                                 LookAt:=xlPart, _
+                                 SearchOrder:=xlByColumns, _
+                                 SearchDirection:=xlPrevious, _
+                                 MatchCase:=False, _
+                                 SearchFormat:=False)
+
+    If Not lastCell Is Nothing Then LastUsedColumn = lastCell.Column
+End Function
+
+Private Function ImportShortStockBatch(ByVal reportFiles As Collection, _
+                                       ByVal destinationSheet As Worksheet) As String
+    Dim fileNumber As Long
+    Dim oneResult As String
+    Dim resultText As String
+
+    For fileNumber = 1 To reportFiles.Count
+        oneResult = ImportOneReport(CStr(reportFiles(fileNumber)), _
+                                    destinationSheet, True, 1, False)
+
+        If Len(resultText) > 0 Then resultText = resultText & "; "
+        resultText = resultText & FileNameOnly(CStr(reportFiles(fileNumber))) & _
+                     " [" & oneResult & "]"
+    Next fileNumber
+
+    ImportShortStockBatch = reportFiles.Count & " file(s): " & resultText
+End Function
+
+Private Function ImportOneReport(ByVal sourcePath As String, _
+                                 ByVal destinationSheet As Worksheet, _
+                                 ByVal appendData As Boolean, _
+                                 ByVal rowsToSkip As Long, _
+                                 ByVal addCurrency As Boolean) As String
+    Dim sourceWb As Workbook
+    Dim sourceWs As Worksheet
+    Dim sourceData As Range
+    Dim dataToPaste As Range
+    Dim pasteCell As Range
+    Dim pastedRange As Range
+    Dim rowCount As Long
+    Dim columnCount As Long
+    Dim destinationLastRow As Long
+    Dim savedErrorNumber As Long
+    Dim savedErrorText As String
+
+    On Error GoTo ImportOneFailed
+
+    If destinationSheet.ProtectContents Then
+        Err.Raise vbObjectError + 2010, "ImportOneReport", _
+                  "Destination tab is protected: " & destinationSheet.Name
+    End If
+
+    Set sourceWb = Workbooks.Open(Filename:=sourcePath, _
+                                  UpdateLinks:=0, _
+                                  ReadOnly:=True, _
+                                  AddToMru:=False, _
+                                  IgnoreReadOnlyRecommended:=True, _
+                                  Notify:=False, _
+                                  Local:=True)
+
+    Set sourceWs = sourceWb.Worksheets(1)
+    Set sourceData = RealDataRange(sourceWs)
+
+    If sourceData Is Nothing Then
+        Err.Raise vbObjectError + 2011, "ImportOneReport", _
+                  "Source report is empty: " & FileNameOnly(sourcePath)
+    End If
+
+    If rowsToSkip > 0 Then
+        If appendData And rowsToSkip = 1 Then
+            ' Clean any repeated SHORT STOCK header left by an earlier import.
+            RemoveRepeatedHeaderRows destinationSheet, sourceData
+        End If
+
+        If sourceData.Rows.Count <= rowsToSkip Then
+            ImportOneReport = "source contains no rows after skipped headings"
+            sourceWb.Close SaveChanges:=False
             Exit Function
         End If
 
+        Set dataToPaste = sourceData.Offset(rowsToSkip, 0).Resize( _
+                              sourceData.Rows.Count - rowsToSkip, _
+                              sourceData.Columns.Count)
+    Else
+        Set dataToPaste = sourceData
+    End If
+
+    If appendData Then
+        destinationLastRow = LastUsedRow(destinationSheet)
+
+        If destinationLastRow > 0 Then
+            If BlockAlreadyAtBottom(dataToPaste, destinationSheet, destinationLastRow) Then
+                ImportOneReport = "same data already present; 0 rows appended"
+                sourceWb.Close SaveChanges:=False
+                Exit Function
+            End If
+
+            Set pasteCell = destinationSheet.Cells(destinationLastRow + 1, 1)
+        Else
+            Set pasteCell = destinationSheet.Range("A1")
+        End If
+    Else
+        destinationSheet.UsedRange.ClearContents
+        Set pasteCell = destinationSheet.Range("A1")
+    End If
+
+    rowCount = dataToPaste.Rows.Count
+    columnCount = dataToPaste.Columns.Count
+
+    dataToPaste.Copy
+    pasteCell.PasteSpecial Paste:=xlPasteValuesAndNumberFormats
+    Application.CutCopyMode = False
+
+    Set pastedRange = destinationSheet.Range(pasteCell, _
+                      pasteCell.Offset(rowCount - 1, columnCount - 1))
+
+    If addCurrency Then AddInterestCurrencyCodes pastedRange
+
+    If appendData Then
+        ImportOneReport = rowCount & " rows appended"
+        If rowsToSkip > 0 Then ImportOneReport = ImportOneReport & "; source header removed"
+    Else
+        ImportOneReport = rowCount & " rows x " & columnCount & " columns replaced"
+        If rowsToSkip > 0 Then ImportOneReport = ImportOneReport & "; top " & rowsToSkip & " rows removed"
+        If addCurrency Then ImportOneReport = ImportOneReport & "; CAD/USD added"
+    End If
+
+    sourceWb.Close SaveChanges:=False
+    Exit Function
+
+ImportOneFailed:
+    savedErrorNumber = Err.Number
+    savedErrorText = Err.Description
+    On Error Resume Next
+    Application.CutCopyMode = False
+    If Not sourceWb Is Nothing Then sourceWb.Close SaveChanges:=False
+    On Error GoTo 0
+    Err.Raise savedErrorNumber, "ImportOneReport", savedErrorText
+End Function
+
+Private Sub AddInterestCurrencyCodes(ByVal pastedRange As Range)
+    Dim dateColumn As Long
+    Dim currencyColumn As Long
+    Dim rowNumber As Long
+    Dim currentCurrency As String
+    Dim rowText As String
+    Dim dateValue As Variant
+
+    dateColumn = FindHeaderColumn(pastedRange, "date")
+    If dateColumn = 0 Then
+        Err.Raise vbObjectError + 2020, "AddInterestCurrencyCodes", _
+                  "Date column was not found in PHN160BS interest report."
+    End If
+
+    currencyColumn = pastedRange.Column + pastedRange.Columns.Count
+
+    For rowNumber = 1 To pastedRange.Rows.Count
+        rowText = LCase$(RowTextValue(pastedRange.Rows(rowNumber)))
+
+        If InStr(1, rowText, "canadian dollar", vbTextCompare) > 0 Then
+            currentCurrency = "CAD"
+        ElseIf InStr(1, rowText, "usa dollar", vbTextCompare) > 0 _
+            Or InStr(1, rowText, "us dollar", vbTextCompare) > 0 _
+            Or InStr(1, rowText, "u.s. dollar", vbTextCompare) > 0 Then
+            currentCurrency = "USD"
+        End If
+
+        dateValue = pastedRange.Cells(rowNumber, dateColumn).Value
+
+        If Len(currentCurrency) > 0 And IsDate(dateValue) Then
+            pastedRange.Worksheet.Cells( _
+                pastedRange.Row + rowNumber - 1, currencyColumn).Value2 = currentCurrency
+        End If
+    Next rowNumber
+End Sub
+
+Private Function FindHeaderColumn(ByVal reportRange As Range, _
+                                  ByVal headerText As String) As Long
+    Dim maximumRows As Long
+    Dim rowNumber As Long
+    Dim columnNumber As Long
+    Dim cellText As String
+
+    maximumRows = reportRange.Rows.Count
+    If maximumRows > 20 Then maximumRows = 20
+
+    For rowNumber = 1 To maximumRows
+        For columnNumber = 1 To reportRange.Columns.Count
+            If Not IsError(reportRange.Cells(rowNumber, columnNumber).Value2) Then
+                cellText = LCase$(Trim$(CStr( _
+                           reportRange.Cells(rowNumber, columnNumber).Value2)))
+
+                If cellText = LCase$(headerText) Then
+                    FindHeaderColumn = columnNumber
+                    Exit Function
+                End If
+            End If
+        Next columnNumber
+    Next rowNumber
+End Function
+
+Private Function RowTextValue(ByVal reportRow As Range) As String
+    Dim cell As Range
+    Dim combinedText As String
+
+    For Each cell In reportRow.Cells
+        If Not IsError(cell.Value2) Then
+            If Len(Trim$(CStr(cell.Value2))) > 0 Then
+                combinedText = combinedText & " " & CStr(cell.Value2)
+            End If
+        End If
+    Next cell
+
+    RowTextValue = combinedText
+End Function
+
+Private Sub RemoveRepeatedHeaderRows(ByVal destinationSheet As Worksheet, _
+                                     ByVal sourceData As Range)
+    Dim destinationLastRow As Long
+    Dim rowNumber As Long
+    Dim columnNumber As Long
+    Dim rowMatchesHeader As Boolean
+
+    destinationLastRow = LastUsedRow(destinationSheet)
+
+    For rowNumber = destinationLastRow To 2 Step -1
+        rowMatchesHeader = True
+
+        For columnNumber = 1 To sourceData.Columns.Count
+            If HeaderValue(destinationSheet.Cells(rowNumber, columnNumber).Value2) <> _
+               HeaderValue(sourceData.Cells(1, columnNumber).Value2) Then
+                rowMatchesHeader = False
+                Exit For
+            End If
+        Next columnNumber
+
+        If rowMatchesHeader Then destinationSheet.Rows(rowNumber).Delete
+    Next rowNumber
+End Sub
+
+Private Function HeaderValue(ByVal cellValue As Variant) As String
+    If IsError(cellValue) Then
+        HeaderValue = "#ERROR"
+    ElseIf IsEmpty(cellValue) Then
+        HeaderValue = vbNullString
+    Else
+        HeaderValue = LCase$(Trim$(CStr(cellValue)))
+    End If
+End Function
+
+Private Function BlockAlreadyAtBottom(ByVal sourceData As Range, _
+                                      ByVal destinationSheet As Worksheet, _
+                                      ByVal destinationLastRow As Long) As Boolean
+    Dim existingBlock As Range
+    Dim sourceValues As Variant
+    Dim existingValues As Variant
+    Dim rowNumber As Long
+    Dim columnNumber As Long
+    Dim firstExistingRow As Long
+
+    If destinationLastRow < sourceData.Rows.Count Then Exit Function
+
+    firstExistingRow = destinationLastRow - sourceData.Rows.Count + 1
+    Set existingBlock = destinationSheet.Cells(firstExistingRow, 1).Resize( _
+                            sourceData.Rows.Count, sourceData.Columns.Count)
+
+    sourceValues = sourceData.Value2
+    existingValues = existingBlock.Value2
+
+    If sourceData.Cells.CountLarge = 1 Then
+        BlockAlreadyAtBottom = ValuesMatch(sourceValues, existingValues)
+        Exit Function
+    End If
+
+    For rowNumber = 1 To sourceData.Rows.Count
+        For columnNumber = 1 To sourceData.Columns.Count
+            If Not ValuesMatch(sourceValues(rowNumber, columnNumber), _
+                               existingValues(rowNumber, columnNumber)) Then
+                Exit Function
+            End If
+        Next columnNumber
+    Next rowNumber
+
+    BlockAlreadyAtBottom = True
+End Function
+
+Private Function ValuesMatch(ByVal firstValue As Variant, _
+                             ByVal secondValue As Variant) As Boolean
+    If IsError(firstValue) Or IsError(secondValue) Then
+        ValuesMatch = (IsError(firstValue) And IsError(secondValue))
+    ElseIf IsEmpty(firstValue) And IsEmpty(secondValue) Then
+        ValuesMatch = True
+    Else
+        ValuesMatch = (CStr(firstValue) = CStr(secondValue))
+    End If
+End Function
+
+Private Function LastUsedRow(ByVal ws As Worksheet) As Long
+    Dim lastCell As Range
+
+    Set lastCell = ws.Cells.Find(What:="*", _
+                                 After:=ws.Cells(1, 1), _
+                                 LookIn:=xlFormulas, _
+                                 LookAt:=xlPart, _
+                                 SearchOrder:=xlByRows, _
+                                 SearchDirection:=xlPrevious, _
+                                 MatchCase:=False, _
+                                 SearchFormat:=False)
+
+    If Not lastCell Is Nothing Then LastUsedRow = lastCell.Row
+End Function
+
+Private Function ResolveReport(ByVal folderPath As String, _
+                               ByVal fileMask As String, _
+                               ByVal reportLabel As String, _
+                               ByVal reportDate As String) As String
+    ResolveReport = FindNewestFile(folderPath, fileMask)
+
+    If Len(ResolveReport) = 0 Then
+        ResolveReport = PickReport(folderPath, _
+                                   "Select " & reportLabel & " report for " & reportDate)
+    End If
+End Function
+
+Private Function PreviousCanadianBusinessDay(ByVal referenceDate As Date) As Date
+    Dim resultDate As Date
+
+    resultDate = DateValue(referenceDate) - 1
+    Do While Weekday(resultDate, vbMonday) > 5 _
+             Or IsCanadianBankHoliday(resultDate)
+        resultDate = resultDate - 1
+    Loop
+
+    PreviousCanadianBusinessDay = resultDate
+End Function
+
+Private Function IsCanadianBankHoliday(ByVal dateToCheck As Date) As Boolean
+    Dim calendarDate As Date
+    Dim calendarYear As Long
+    Dim christmasObserved As Date
+    Dim boxingDayObserved As Date
+
+    calendarDate = DateValue(dateToCheck)
+    calendarYear = Year(calendarDate)
+
+    ' Bank of Canada / Ontario banking calendar.
+    If calendarDate = ObservedWeekday(DateSerial(calendarYear, 1, 1)) Then GoTo HolidayFound
+    If calendarDate = NthWeekdayOfMonth(calendarYear, 2, vbMonday, 3) Then GoTo HolidayFound
+    If calendarDate = EasterSunday(calendarYear) - 2 Then GoTo HolidayFound
+    If calendarDate = VictoriaDay(calendarYear) Then GoTo HolidayFound
+    If calendarDate = ObservedWeekday(DateSerial(calendarYear, 7, 1)) Then GoTo HolidayFound
+    If calendarDate = NthWeekdayOfMonth(calendarYear, 8, vbMonday, 1) Then GoTo HolidayFound
+    If calendarDate = NthWeekdayOfMonth(calendarYear, 9, vbMonday, 1) Then GoTo HolidayFound
+    If calendarDate = ObservedWeekday(DateSerial(calendarYear, 9, 30)) Then GoTo HolidayFound
+    If calendarDate = NthWeekdayOfMonth(calendarYear, 10, vbMonday, 2) Then GoTo HolidayFound
+    If calendarDate = ObservedWeekday(DateSerial(calendarYear, 11, 11)) Then GoTo HolidayFound
+
+    christmasObserved = ObservedWeekday(DateSerial(calendarYear, 12, 25))
+    boxingDayObserved = ObservedWeekday(DateSerial(calendarYear, 12, 26))
+
+    Do While boxingDayObserved = christmasObserved _
+             Or Weekday(boxingDayObserved, vbMonday) > 5
+        boxingDayObserved = boxingDayObserved + 1
+    Loop
+
+    If calendarDate = christmasObserved Then GoTo HolidayFound
+    If calendarDate = boxingDayObserved Then GoTo HolidayFound
+
+    Exit Function
+
+HolidayFound:
+    IsCanadianBankHoliday = True
+End Function
+
+Private Function ObservedWeekday(ByVal holidayDate As Date) As Date
+    Select Case Weekday(holidayDate, vbMonday)
+        Case 6
+            ObservedWeekday = holidayDate + 2
+        Case 7
+            ObservedWeekday = holidayDate + 1
+        Case Else
+            ObservedWeekday = holidayDate
+    End Select
+End Function
+
+Private Function NthWeekdayOfMonth(ByVal calendarYear As Long, _
+                                   ByVal calendarMonth As Long, _
+                                   ByVal weekdayNumber As VbDayOfWeek, _
+                                   ByVal occurrenceNumber As Long) As Date
+    Dim firstDate As Date
+    Dim dayOffset As Long
+
+    firstDate = DateSerial(calendarYear, calendarMonth, 1)
+    dayOffset = (weekdayNumber - Weekday(firstDate, vbSunday) + 7) Mod 7
+
+    NthWeekdayOfMonth = firstDate + dayOffset + (7 * (occurrenceNumber - 1))
+End Function
+
+Private Function VictoriaDay(ByVal calendarYear As Long) As Date
+    Dim resultDate As Date
+
+    resultDate = DateSerial(calendarYear, 5, 24)
+    Do While Weekday(resultDate, vbMonday) <> 1
+        resultDate = resultDate - 1
+    Loop
+
+    VictoriaDay = resultDate
+End Function
+
+Private Function EasterSunday(ByVal calendarYear As Long) As Date
+    Dim a As Long
+    Dim b As Long
+    Dim c As Long
+    Dim d As Long
+    Dim e As Long
+    Dim f As Long
+    Dim g As Long
+    Dim h As Long
+    Dim i As Long
+    Dim k As Long
+    Dim l As Long
+    Dim m As Long
+    Dim easterMonth As Long
+    Dim easterDay As Long
+
+    a = calendarYear Mod 19
+    b = calendarYear \ 100
+    c = calendarYear Mod 100
+    d = b \ 4
+    e = b Mod 4
+    f = (b + 8) \ 25
+    g = (b - f + 1) \ 3
+    h = (19 * a + b - d - g + 15) Mod 30
+    i = c \ 4
+    k = c Mod 4
+    l = (32 + 2 * e + 2 * i - h - k) Mod 7
+    m = (a + 11 * h + 22 * l) \ 451
+    easterMonth = (h + l - 7 * m + 114) \ 31
+    easterDay = ((h + l - 7 * m + 114) Mod 31) + 1
+
+    EasterSunday = DateSerial(calendarYear, easterMonth, easterDay)
+End Function
+
+Private Function RealDataRange(ByVal ws As Worksheet) As Range
+    Dim lastRowCell As Range
+    Dim lastColumnCell As Range
+
+    Set lastRowCell = ws.Cells.Find(What:="*", _
+                                    After:=ws.Cells(1, 1), _
+                                    LookIn:=xlFormulas, _
+                                    LookAt:=xlPart, _
+                                    SearchOrder:=xlByRows, _
+                                    SearchDirection:=xlPrevious, _
+                                    MatchCase:=False, _
+                                    SearchFormat:=False)
+
+    If lastRowCell Is Nothing Then Exit Function
+
+    Set lastColumnCell = ws.Cells.Find(What:="*", _
+                                       After:=ws.Cells(1, 1), _
+                                       LookIn:=xlFormulas, _
+                                       LookAt:=xlPart, _
+                                       SearchOrder:=xlByColumns, _
+                                       SearchDirection:=xlPrevious, _
+                                       MatchCase:=False, _
+                                       SearchFormat:=False)
+
+    Set RealDataRange = ws.Range(ws.Cells(1, 1), _
+                                 ws.Cells(lastRowCell.Row, lastColumnCell.Column))
+End Function
+
+Private Function GetWorksheetFlexible(ByVal wb As Workbook, _
+                                      ByVal expectedName As String) As Worksheet
+    Dim ws As Worksheet
+    Dim normalizedExpected As String
+
+    On Error Resume Next
+    Set GetWorksheetFlexible = wb.Worksheets(expectedName)
+    On Error GoTo 0
+
+    If Not GetWorksheetFlexible Is Nothing Then Exit Function
+
+    normalizedExpected = NormalizeName(expectedName)
+    For Each ws In wb.Worksheets
+        If NormalizeName(ws.Name) = normalizedExpected Then
+            Set GetWorksheetFlexible = ws
+            Exit Function
+        End If
+    Next ws
+End Function
+
+Private Function NormalizeName(ByVal textValue As String) As String
+    Dim result As String
+
+    result = LCase$(Trim$(textValue))
+    result = Replace(result, "_", "")
+    result = Replace(result, " ", "")
+    result = Replace(result, "-", "")
+    NormalizeName = result
+End Function
+
+Private Function FindAllNumberedReports(ByVal folderPath As String, _
+                                        ByVal fileMask As String) As Collection
+    Dim result As Collection
+    Dim filePaths() As String
+    Dim fileOrders() As Long
+    Dim fileTimes() As Date
+    Dim fileName As String
+    Dim fullPath As String
+    Dim fileCount As Long
+    Dim i As Long
+    Dim j As Long
+    Dim tempPath As String
+    Dim tempOrder As Long
+    Dim tempTime As Date
+
+    Set result = New Collection
+    On Error GoTo SearchFinished
+
+    If Right$(folderPath, 1) <> "\" Then folderPath = folderPath & "\"
+
+    fileName = Dir$(folderPath & fileMask, _
+                    vbNormal Or vbHidden Or vbReadOnly Or vbSystem Or vbArchive)
+
+    Do While Len(fileName) > 0
+        fullPath = folderPath & fileName
+        fileCount = fileCount + 1
+
+        If fileCount = 1 Then
+            ReDim filePaths(1 To 1)
+            ReDim fileOrders(1 To 1)
+            ReDim fileTimes(1 To 1)
+        Else
+            ReDim Preserve filePaths(1 To fileCount)
+            ReDim Preserve fileOrders(1 To fileCount)
+            ReDim Preserve fileTimes(1 To fileCount)
+        End If
+
+        filePaths(fileCount) = fullPath
+        fileOrders(fileCount) = NumberedReportOrder(fileName)
+        fileTimes(fileCount) = FileDateTime(fullPath)
+        fileName = Dir$()
+    Loop
+
+    ' Base file first, followed by (1), (2), (3), etc.
+    For i = 1 To fileCount - 1
+        For j = i + 1 To fileCount
+            If fileOrders(j) < fileOrders(i) _
+               Or (fileOrders(j) = fileOrders(i) And fileTimes(j) < fileTimes(i)) Then
+
+                tempPath = filePaths(i)
+                filePaths(i) = filePaths(j)
+                filePaths(j) = tempPath
+
+                tempOrder = fileOrders(i)
+                fileOrders(i) = fileOrders(j)
+                fileOrders(j) = tempOrder
+
+                tempTime = fileTimes(i)
+                fileTimes(i) = fileTimes(j)
+                fileTimes(j) = tempTime
+            End If
+        Next j
+    Next i
+
+    For i = 1 To fileCount
+        result.Add filePaths(i)
+    Next i
+
+SearchFinished:
+    Set FindAllNumberedReports = result
+End Function
+
+Private Function NumberedReportOrder(ByVal fileName As String) As Long
+    Dim baseName As String
+    Dim dotPosition As Long
+    Dim openPosition As Long
+    Dim closePosition As Long
+    Dim numberText As String
+
+    baseName = fileName
+    dotPosition = InStrRev(baseName, ".")
+    If dotPosition > 0 Then baseName = Left$(baseName, dotPosition - 1)
+
+    openPosition = InStrRev(baseName, "(")
+    closePosition = InStrRev(baseName, ")")
+
+    If openPosition > 0 And closePosition = Len(baseName) Then
+        numberText = Trim$(Mid$(baseName, openPosition + 1, _
+                               closePosition - openPosition - 1))
+        If IsNumeric(numberText) Then
+            NumberedReportOrder = CLng(numberText)
+            Exit Function
+        End If
+    End If
+
+    NumberedReportOrder = 0
+End Function
+
+Private Function FindNewestFile(ByVal folderPath As String, _
+                                ByVal fileMask As String) As String
+    Dim fileName As String
+    Dim fullPath As String
+    Dim newestTime As Date
+    Dim currentTime As Date
+
+    On Error GoTo SearchFinished
+    If Right$(folderPath, 1) <> "\" Then folderPath = folderPath & "\"
+
+    fileName = Dir$(folderPath & fileMask, _
+                    vbNormal Or vbHidden Or vbReadOnly Or vbSystem Or vbArchive)
+
+    Do While Len(fileName) > 0
+        fullPath = folderPath & fileName
+        currentTime = FileDateTime(fullPath)
+
+        If Len(FindNewestFile) = 0 Or currentTime > newestTime Then
+            FindNewestFile = fullPath
+            newestTime = currentTime
+        End If
+
+        fileName = Dir$()
+    Loop
+
+SearchFinished:
+End Function
+
+Private Function PickReport(ByVal initialFolder As String, _
+                            ByVal dialogTitle As String) As String
+    With Application.FileDialog(3)
+        .Title = dialogTitle
+        .AllowMultiSelect = False
+        .InitialFileName = initialFolder
+        .Filters.Clear
+        .Filters.Add "Excel and CSV reports", _
+                     "*.xlsx;*.xls;*.xlsm;*.xlsb;*.csv"
+        .Filters.Add "All files", "*.*"
+
+        If .Show = -1 Then PickReport = .SelectedItems(1)
     End With
+End Function
 
-    Set FindOrSelectPBLoader = Workbooks.Open( _
-        Filename:=selectedFile, _
-        UpdateLinks:=0, _
-        ReadOnly:=False, _
-        AddToMru:=False)
+Private Function YYYYMMDDToMMDDYYYY(ByVal dateText As String) As String
+    If Len(dateText) <> 8 Or Not dateText Like "########" Then
+        Err.Raise vbObjectError + 2030, "YYYYMMDDToMMDDYYYY", _
+                  "Invalid YYYYMMDD date: " & dateText
+    End If
 
+    YYYYMMDDToMMDDYYYY = Mid$(dateText, 5, 2) & "_" & _
+                         Right$(dateText, 2) & "_" & _
+                         Left$(dateText, 4)
+End Function
+
+Private Function ExtractReportDate(ByVal fullPath As String) As String
+    Dim fileName As String
+    Dim candidate As String
+    Dim i As Long
+    Dim yearNumber As Long
+    Dim monthNumber As Long
+    Dim dayNumber As Long
+
+    fileName = FileNameOnly(fullPath)
+
+    For i = 1 To Len(fileName) - 7
+        candidate = Mid$(fileName, i, 8)
+
+        If candidate Like "########" Then
+            yearNumber = CLng(Left$(candidate, 4))
+            monthNumber = CLng(Mid$(candidate, 5, 2))
+            dayNumber = CLng(Right$(candidate, 2))
+
+            If yearNumber >= 2000 And yearNumber <= 2099 _
+               And monthNumber >= 1 And monthNumber <= 12 _
+               And dayNumber >= 1 And dayNumber <= 31 Then
+                ExtractReportDate = candidate
+                Exit Function
+            End If
+        End If
+    Next i
+End Function
+
+Private Function FileNameOnly(ByVal fullPath As String) As String
+    Dim slashPosition As Long
+    Dim forwardSlashPosition As Long
+
+    slashPosition = InStrRev(fullPath, "\")
+    forwardSlashPosition = InStrRev(fullPath, "/")
+    If forwardSlashPosition > slashPosition Then slashPosition = forwardSlashPosition
+
+    FileNameOnly = Mid$(fullPath, slashPosition + 1)
+End Function
+
+Private Function FolderExists(ByVal folderPath As String) As Boolean
+    FolderExists = CreateObject("Scripting.FileSystemObject").FolderExists(folderPath)
 End Function
