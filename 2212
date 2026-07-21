@@ -10,12 +10,13 @@ Private Const DEST_PHN_SLFSM As String = "phn_YYYYMMDD_slfsm TOD"
 
 ' Source report dated today and appended as history.
 Private Const DEST_SHORT_STOCK As String = "YYYYMMDD_SHORT_STOCK_DETAIL"
+Private Const DEST_INTEREST_ACTIVITY As String = "YYYYMMDD_INTEREST_ACTIVITY"
 Private Const DEST_PHN160_INTEREST As String = "PHN160BS - interest"
 Private Const DEST_TD_INTEREST As String = "TD Interest"
 Private Const DEST_STOCKLOAN_TOD As String = "Stockloan-TOD"
 
 Public Sub Import_All_PB_Reports()
-    Const REPORT_COUNT As Long = 10
+    Const REPORT_COUNT As Long = 11
 
     Dim hostWb As Workbook
     Dim targets(1 To REPORT_COUNT) As Worksheet
@@ -113,6 +114,10 @@ Public Sub Import_All_PB_Reports()
     masks(10) = "loanfees_" & previousReportDateUS & ".*"
     targetNames(10) = DEST_STOCKLOAN_TOD
 
+    labels(11) = "INTEREST ACTIVITY"
+    masks(11) = todayReportDate & "_INTEREST_ACTIVITY.*"
+    targetNames(11) = DEST_INTEREST_ACTIVITY
+
     ' Tuesday can contain the base SHORT STOCK file plus (1), (2), etc.
     Set shortStockFiles = FindAllNumberedReports(downloadFolder, masks(7))
     If shortStockFiles.Count = 0 Then
@@ -127,7 +132,7 @@ Public Sub Import_All_PB_Reports()
     ' Locate every source before changing any destination tab.
     For i = 2 To REPORT_COUNT
         If i <> 7 Then
-            If i <= 6 Or i >= 9 Then
+            If i <= 6 Or i = 9 Or i = 10 Then
                 reportFiles(i) = ResolveReport(downloadFolder, masks(i), labels(i), previousReportDate)
             Else
                 reportFiles(i) = ResolveReport(downloadFolder, masks(i), labels(i), todayReportDate)
