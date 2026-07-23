@@ -8,12 +8,18 @@ Option Explicit
 
 Private Const LDR_SOURCE_SHEET As String = "Scotia - RT624BSPh160CS"
 Private Const LDR_PH632_RT684_SHEET As String = "PH632-RT684"
+Private Const LDR_RT624CS_SHEET As String = "SOCGEN_RT624CS"
 Private Const LDR_TARGET_SHEET As String = "TEMPLATE"
+
+Private Const LDR_MODE_NORMAL As Long = 0
+Private Const LDR_MODE_MONDAY As Long = 1
+Private Const LDR_MODE_LONG_WEEKEND As Long = 2
 
 Public Sub Load_PB_Differences_ValuesOnly()
     Dim sourceWb As Workbook
     Dim sourceWs As Worksheet
     Dim ph632Rt684Ws As Worksheet
+    Dim rt624csWs As Worksheet
     Dim loaderWb As Workbook
     Dim loaderWs As Worksheet
 
@@ -30,6 +36,15 @@ Public Sub Load_PB_Differences_ValuesOnly()
     Dim interestSourceColumn As String
     Dim interestModeText As String
     Dim processingDate As Date
+    Dim rt624csProcessingDate As Date
+    Dim rt624csMode As Long
+    Dim rt624csModeText As String
+    Dim rt624csStockColumn As String
+    Dim rt624csStockFirstRow As Long
+    Dim rt624csInterestColumn As String
+    Dim rt624csInterestFirstRow As Long
+    Dim rt624csCurrencies As Variant
+    Dim mappingIndex As Long
 
     Dim i As Long
     Dim targetCell As Range
@@ -57,6 +72,15 @@ Public Sub Load_PB_Differences_ValuesOnly()
         Err.Raise vbObjectError + 7106, _
                   "Load_PB_Differences_ValuesOnly", _
                   "Source tab not found: " & LDR_PH632_RT684_SHEET
+    End If
+
+    Set rt624csWs = LDR_GetWorksheetFlexible( _
+        sourceWb, LDR_RT624CS_SHEET)
+
+    If rt624csWs Is Nothing Then
+        Err.Raise vbObjectError + 7107, _
+                  "Load_PB_Differences_ValuesOnly", _
+                  "Source tab not found: " & LDR_RT624CS_SHEET
     End If
 
     Set loaderWb = LDR_FindOrOpenLoaderWorkbook(sourceWb)
@@ -95,10 +119,35 @@ Public Sub Load_PB_Differences_ValuesOnly()
 
     sourceWs.Calculate
     ph632Rt684Ws.Calculate
+    rt624csWs.Calculate
 
     processingDate = LDR_GetPH632ProcessingDate(ph632Rt684Ws)
     interestSourceColumn = LDR_GetInterestSourceColumn( _
         processingDate, interestModeText)
+
+    rt624csProcessingDate = LDR_GetRT624CSProcessingDate(rt624csWs)
+    rt624csMode = LDR_GetProcessingMode( _
+        rt624csProcessingDate, rt624csModeText)
+
+    Select Case rt624csMode
+        Case LDR_MODE_LONG_WEEKEND
+            rt624csStockColumn = "F"
+            rt624csStockFirstRow = 2
+            rt624csInterestColumn = "F"
+            rt624csInterestFirstRow = 11
+
+        Case LDR_MODE_MONDAY
+            rt624csStockColumn = "E"
+            rt624csStockFirstRow = 2
+            rt624csInterestColumn = "E"
+            rt624csInterestFirstRow = 11
+
+        Case Else
+            rt624csStockColumn = "M"
+            rt624csStockFirstRow = 13
+            rt624csInterestColumn = "N"
+            rt624csInterestFirstRow = 3
+    End Select
 
     Set targetCells = New Collection
     Set targetValues = New Collection
@@ -212,6 +261,41 @@ Public Sub Load_PB_Differences_ValuesOnly()
                        currencyColumn, annotationColumn, _
                        targetCells, targetValues, targetDetails, problems
 
+    ' RT624CS stock loan.
+    ' Normal: M13:M14. Monday: E2:E3. Long weekend: F2:F3.
+    LDR_QueueFixedCell rt624csWs, loaderWs, _
+                       rt624csStockColumn & _
+                       CStr(rt624csStockFirstRow), "JPY", _
+                       "RT624CS", "STOCKLOANFEE", _
+                       headerRow, entityColumn, amountColumn, _
+                       currencyColumn, annotationColumn, _
+                       targetCells, targetValues, targetDetails, problems
+
+    LDR_QueueFixedCell rt624csWs, loaderWs, _
+                       rt624csStockColumn & _
+                       CStr(rt624csStockFirstRow + 1), "SGD", _
+                       "RT624CS", "STOCKLOANFEE", _
+                       headerRow, entityColumn, amountColumn, _
+                       currencyColumn, annotationColumn, _
+                       targetCells, targetValues, targetDetails, problems
+
+    ' RT624CS PB interest currencies, in source-row order.
+    ' Normal: N3:N8. Monday: E11:E16. Long weekend: F11:F16.
+    rt624csCurrencies = Array( _
+        "HKD", "JPY", "NZD", "SGD", "USD", "AUD")
+
+    For mappingIndex = LBound(rt624csCurrencies) To UBound(rt624csCurrencies)
+
+        LDR_QueueFixedCell rt624csWs, loaderWs, _
+                           rt624csInterestColumn & _
+                           CStr(rt624csInterestFirstRow + mappingIndex), _
+                           CStr(rt624csCurrencies(mappingIndex)), _
+                           "RT624CS", "PBINTEREST", _
+                           headerRow, entityColumn, amountColumn, _
+                           currencyColumn, annotationColumn, _
+                           targetCells, targetValues, targetDetails, problems
+    Next mappingIndex
+
     ' Preflight finishes before any loader cell is changed.
     If Len(problems) > 0 Then
         Err.Raise vbObjectError + 7105, _
@@ -220,7 +304,7 @@ Public Sub Load_PB_Differences_ValuesOnly()
     End If
 
     If targetCells.Count = 0 Then
-        MsgBox "No non-zero difference values were found.", _
+        MsgBox "No usable difference values were found.", _
                vbInformation, "PB Loader"
         Exit Sub
     End If
@@ -262,6 +346,9 @@ LDR_CleanUp:
                    "PH632M/RT684M interest source: " & _
                    interestModeText & " for " & _
                    Format$(processingDate, "yyyy-mm-dd") & "." & vbCrLf & _
+                   "RT624CS source: " & _
+                   rt624csModeText & " for " & _
+                   Format$(rt624csProcessingDate, "yyyy-mm-dd") & "." & vbCrLf & _
                    "Only the AMOUNT cells were changed.", _
                    vbInformation, "PB Loader"
         End If
@@ -385,7 +472,7 @@ Private Sub LDR_QueueFixedCell(ByVal sourceWs As Worksheet, _
     Dim detailText As String
 
     If Not LDR_TryReadDifference( _
-        sourceWs.Range(sourceAddress).Value2, differenceValue) Then
+        sourceWs.Range(sourceAddress).Value2, differenceValue, True) Then
         Exit Sub
     End If
 
@@ -420,7 +507,9 @@ Private Sub LDR_QueueFixedCell(ByVal sourceWs As Worksheet, _
 End Sub
 
 Private Function LDR_TryReadDifference(ByVal rawValue As Variant, _
-                                       ByRef resultValue As Double) As Boolean
+                                       ByRef resultValue As Double, _
+                                       Optional ByVal includeZero As Boolean = False) _
+                                       As Boolean
     Dim textValue As String
     Dim negativeValue As Boolean
 
@@ -450,7 +539,12 @@ Private Function LDR_TryReadDifference(ByVal rawValue As Variant, _
     End If
 
     resultValue = Application.WorksheetFunction.Round(resultValue, 2)
-    If Abs(resultValue) >= 0.01 Then LDR_TryReadDifference = True
+
+    If includeZero Then
+        LDR_TryReadDifference = True
+    ElseIf Abs(resultValue) >= 0.01 Then
+        LDR_TryReadDifference = True
+    End If
 End Function
 
 Private Function LDR_GetPH632ProcessingDate( _
@@ -467,9 +561,39 @@ Private Function LDR_GetPH632ProcessingDate( _
     End If
 End Function
 
+Private Function LDR_GetRT624CSProcessingDate( _
+    ByVal sourceWs As Worksheet) As Date
+
+    If IsDate(sourceWs.Range("B1").Value) Then
+        LDR_GetRT624CSProcessingDate = _
+            DateValue(sourceWs.Range("B1").Value)
+    ElseIf IsDate(sourceWs.Range("B10").Value) Then
+        LDR_GetRT624CSProcessingDate = _
+            DateValue(sourceWs.Range("B10").Value)
+    Else
+        LDR_GetRT624CSProcessingDate = Date
+    End If
+End Function
+
 Private Function LDR_GetInterestSourceColumn( _
     ByVal processingDate As Date, _
     ByRef modeText As String) As String
+
+    Select Case LDR_GetProcessingMode(processingDate, modeText)
+        Case LDR_MODE_LONG_WEEKEND
+            LDR_GetInterestSourceColumn = "J"
+
+        Case LDR_MODE_MONDAY
+            LDR_GetInterestSourceColumn = "I"
+
+        Case Else
+            LDR_GetInterestSourceColumn = "X"
+    End Select
+End Function
+
+Private Function LDR_GetProcessingMode( _
+    ByVal processingDate As Date, _
+    ByRef modeText As String) As Long
 
     Dim priorBusinessDate As Date
     Dim calendarDayGap As Long
@@ -482,14 +606,14 @@ Private Function LDR_GetInterestSourceColumn( _
     ' - Tuesday after a Canadian Monday holiday
     ' - Monday after a Canadian Friday holiday
     If calendarDayGap >= 4 Then
-        LDR_GetInterestSourceColumn = "J"
-        modeText = "LONG WKD (column J)"
+        LDR_GetProcessingMode = LDR_MODE_LONG_WEEKEND
+        modeText = "LONG WKD"
     ElseIf Weekday(processingDate, vbMonday) = 1 Then
-        LDR_GetInterestSourceColumn = "I"
-        modeText = "MONDAY AMT (column I)"
+        LDR_GetProcessingMode = LDR_MODE_MONDAY
+        modeText = "MONDAY AMT"
     Else
-        LDR_GetInterestSourceColumn = "X"
-        modeText = "normal difference (column X)"
+        LDR_GetProcessingMode = LDR_MODE_NORMAL
+        modeText = "normal difference"
     End If
 End Function
 
