@@ -12,7 +12,6 @@ Private Const LDR_RT624CS_SHEET As String = "SOCGEN_RT624CS"
 Private Const LDR_PH160BS_SHEET As String = "PH191S-PH160BS"
 Private Const LDR_PH160AS_SHEET As String = "PH160AS - CASH JOURNAL"
 Private Const LDR_TARGET_SHEET As String = "TEMPLATE"
-Private Const LDR_CODE_VERSION As String = "2026-07-23-PH160AS-v2"
 
 Private Const LDR_MODE_NORMAL As Long = 0
 Private Const LDR_MODE_MONDAY As Long = 1
@@ -389,13 +388,13 @@ Public Sub Load_PB_Differences_ValuesOnly()
                        "PH160AS", "STOCKLOANFEE", _
                        headerRow, entityColumn, amountColumn, _
                        currencyColumn, annotationColumn, _
-                       targetCells, targetValues, targetDetails, problems, -1
+                       targetCells, targetValues, targetDetails, problems
 
     LDR_QueueFixedCell ph160asWs, loaderWs, "O3", "CAD", _
                        "PH160AS", "STOCKLOANFEE", _
                        headerRow, entityColumn, amountColumn, _
                        currencyColumn, annotationColumn, _
-                       targetCells, targetValues, targetDetails, problems, -1
+                       targetCells, targetValues, targetDetails, problems
 
     ' PH160AS PB interest only:
     ' Normal O6:O7, Monday E7:E8, Canadian long weekend F7:F8.
@@ -404,14 +403,14 @@ Public Sub Load_PB_Differences_ValuesOnly()
                        "PH160AS", "PBINTEREST", _
                        headerRow, entityColumn, amountColumn, _
                        currencyColumn, annotationColumn, _
-                       targetCells, targetValues, targetDetails, problems, -1
+                       targetCells, targetValues, targetDetails, problems
 
     LDR_QueueFixedCell ph160asWs, loaderWs, _
                        ph160asCadInterestAddress, "CAD", _
                        "PH160AS", "PBINTEREST", _
                        headerRow, entityColumn, amountColumn, _
                        currencyColumn, annotationColumn, _
-                       targetCells, targetValues, targetDetails, problems, -1
+                       targetCells, targetValues, targetDetails, problems
 
     ' Preflight finishes before any loader cell is changed.
     If Len(problems) > 0 Then
@@ -421,8 +420,7 @@ Public Sub Load_PB_Differences_ValuesOnly()
     End If
 
     If targetCells.Count = 0 Then
-        MsgBox "No usable difference values were found.", _
-               vbInformation, "PB Loader"
+        MsgBox "Paste Done", vbInformation, "PB Loader"
         Exit Sub
     End If
 
@@ -457,24 +455,7 @@ LDR_CleanUp:
         MsgBox errorText, vbExclamation, "PB Loader"
     ElseIf Not targetCells Is Nothing Then
         If targetCells.Count > 0 Then
-            MsgBox CStr(targetCells.Count) & _
-                   " difference values were written to " & _
-                   loaderWb.Name & " / " & loaderWs.Name & "." & vbCrLf & _
-                   "Code version: " & LDR_CODE_VERSION & "." & vbCrLf & _
-                   "PH632M/RT684M interest source: " & _
-                   interestModeText & " for " & _
-                   Format$(processingDate, "yyyy-mm-dd") & "." & vbCrLf & _
-                   "RT624CS source: " & _
-                   rt624csModeText & " for " & _
-                   Format$(rt624csProcessingDate, "yyyy-mm-dd") & "." & vbCrLf & _
-                   "PH160BS source: " & _
-                   ph160bsModeText & " for " & _
-                   Format$(ph160bsProcessingDate, "yyyy-mm-dd") & "." & vbCrLf & _
-                   "PH160AS interest source: " & _
-                   ph160asModeText & " for " & _
-                   Format$(ph160asProcessingDate, "yyyy-mm-dd") & "." & vbCrLf & _
-                   "Only the AMOUNT cells were changed.", _
-                   vbInformation, "PB Loader"
+            MsgBox "Paste Done", vbInformation, "PB Loader"
         End If
     End If
 
