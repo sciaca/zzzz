@@ -9,6 +9,7 @@ Option Explicit
 Private Const LDR_SOURCE_SHEET As String = "Scotia - RT624BSPh160CS"
 Private Const LDR_PH632_RT684_SHEET As String = "PH632-RT684"
 Private Const LDR_RT624CS_SHEET As String = "SOCGEN_RT624CS"
+Private Const LDR_PH160BS_SHEET As String = "PH191S-PH160BS"
 Private Const LDR_TARGET_SHEET As String = "TEMPLATE"
 
 Private Const LDR_MODE_NORMAL As Long = 0
@@ -20,6 +21,7 @@ Public Sub Load_PB_Differences_ValuesOnly()
     Dim sourceWs As Worksheet
     Dim ph632Rt684Ws As Worksheet
     Dim rt624csWs As Worksheet
+    Dim ph160bsWs As Worksheet
     Dim loaderWb As Workbook
     Dim loaderWs As Worksheet
 
@@ -45,6 +47,11 @@ Public Sub Load_PB_Differences_ValuesOnly()
     Dim rt624csInterestFirstRow As Long
     Dim rt624csCurrencies As Variant
     Dim mappingIndex As Long
+    Dim ph160bsProcessingDate As Date
+    Dim ph160bsMode As Long
+    Dim ph160bsModeText As String
+    Dim ph160bsCadAddress As String
+    Dim ph160bsUsdAddress As String
 
     Dim i As Long
     Dim targetCell As Range
@@ -81,6 +88,15 @@ Public Sub Load_PB_Differences_ValuesOnly()
         Err.Raise vbObjectError + 7107, _
                   "Load_PB_Differences_ValuesOnly", _
                   "Source tab not found: " & LDR_RT624CS_SHEET
+    End If
+
+    Set ph160bsWs = LDR_GetWorksheetFlexible( _
+        sourceWb, LDR_PH160BS_SHEET)
+
+    If ph160bsWs Is Nothing Then
+        Err.Raise vbObjectError + 7108, _
+                  "Load_PB_Differences_ValuesOnly", _
+                  "Source tab not found: " & LDR_PH160BS_SHEET
     End If
 
     Set loaderWb = LDR_FindOrOpenLoaderWorkbook(sourceWb)
@@ -120,6 +136,7 @@ Public Sub Load_PB_Differences_ValuesOnly()
     sourceWs.Calculate
     ph632Rt684Ws.Calculate
     rt624csWs.Calculate
+    ph160bsWs.Calculate
 
     processingDate = LDR_GetPH632ProcessingDate(ph632Rt684Ws)
     interestSourceColumn = LDR_GetInterestSourceColumn( _
@@ -147,6 +164,24 @@ Public Sub Load_PB_Differences_ValuesOnly()
             rt624csStockFirstRow = 13
             rt624csInterestColumn = "N"
             rt624csInterestFirstRow = 3
+    End Select
+
+    ph160bsProcessingDate = LDR_GetPH160BSProcessingDate(ph160bsWs)
+    ph160bsMode = LDR_GetProcessingMode( _
+        ph160bsProcessingDate, ph160bsModeText)
+
+    Select Case ph160bsMode
+        Case LDR_MODE_LONG_WEEKEND
+            ph160bsCadAddress = "E23"
+            ph160bsUsdAddress = "E24"
+
+        Case LDR_MODE_MONDAY
+            ph160bsCadAddress = "D23"
+            ph160bsUsdAddress = "D24"
+
+        Case Else
+            ph160bsCadAddress = "P22"
+            ph160bsUsdAddress = "P23"
     End Select
 
     Set targetCells = New Collection
@@ -296,6 +331,23 @@ Public Sub Load_PB_Differences_ValuesOnly()
                            targetCells, targetValues, targetDetails, problems
     Next mappingIndex
 
+    ' PH160BS PB interest.
+    ' Normal: P22:P23. Monday: D23:D24.
+    ' Canadian long weekend: E23:E24.
+    LDR_QueueFixedCell ph160bsWs, loaderWs, _
+                       ph160bsCadAddress, "CAD", _
+                       "PH160BS", "PBINTEREST", _
+                       headerRow, entityColumn, amountColumn, _
+                       currencyColumn, annotationColumn, _
+                       targetCells, targetValues, targetDetails, problems
+
+    LDR_QueueFixedCell ph160bsWs, loaderWs, _
+                       ph160bsUsdAddress, "USD", _
+                       "PH160BS", "PBINTEREST", _
+                       headerRow, entityColumn, amountColumn, _
+                       currencyColumn, annotationColumn, _
+                       targetCells, targetValues, targetDetails, problems
+
     ' Preflight finishes before any loader cell is changed.
     If Len(problems) > 0 Then
         Err.Raise vbObjectError + 7105, _
@@ -349,6 +401,9 @@ LDR_CleanUp:
                    "RT624CS source: " & _
                    rt624csModeText & " for " & _
                    Format$(rt624csProcessingDate, "yyyy-mm-dd") & "." & vbCrLf & _
+                   "PH160BS source: " & _
+                   ph160bsModeText & " for " & _
+                   Format$(ph160bsProcessingDate, "yyyy-mm-dd") & "." & vbCrLf & _
                    "Only the AMOUNT cells were changed.", _
                    vbInformation, "PB Loader"
         End If
@@ -429,11 +484,8 @@ Private Sub LDR_QueueOne(ByVal sourceWs As Worksheet, _
         loaderWs, headerRow, entityColumn, currencyColumn, _
         annotationColumn, entityId, currencyText, annotationText)
 
-    If loaderRow = 0 Then
-        problems = problems & "- Loader row not found: " & _
-                   detailText & "." & vbCrLf
-        Exit Sub
-    End If
+    ' No matching loader row means this combination has no loader data.
+    If loaderRow = 0 Then Exit Sub
 
     Set amountCell = loaderWs.Cells(loaderRow, amountColumn)
 
@@ -485,11 +537,8 @@ Private Sub LDR_QueueFixedCell(ByVal sourceWs As Worksheet, _
         loaderWs, headerRow, entityColumn, currencyColumn, _
         annotationColumn, entityId, currencyText, annotationText)
 
-    If loaderRow = 0 Then
-        problems = problems & "- Loader row not found: " & _
-                   detailText & "." & vbCrLf
-        Exit Sub
-    End If
+    ' No matching loader row means this combination has no loader data.
+    If loaderRow = 0 Then Exit Sub
 
     Set amountCell = loaderWs.Cells(loaderRow, amountColumn)
 
@@ -572,6 +621,17 @@ Private Function LDR_GetRT624CSProcessingDate( _
             DateValue(sourceWs.Range("B10").Value)
     Else
         LDR_GetRT624CSProcessingDate = Date
+    End If
+End Function
+
+Private Function LDR_GetPH160BSProcessingDate( _
+    ByVal sourceWs As Worksheet) As Date
+
+    If IsDate(sourceWs.Range("C22").Value) Then
+        LDR_GetPH160BSProcessingDate = _
+            DateValue(sourceWs.Range("C22").Value)
+    Else
+        LDR_GetPH160BSProcessingDate = Date
     End If
 End Function
 
