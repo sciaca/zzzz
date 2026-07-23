@@ -12,6 +12,7 @@ Private Const LDR_RT624CS_SHEET As String = "SOCGEN_RT624CS"
 Private Const LDR_PH160BS_SHEET As String = "PH191S-PH160BS"
 Private Const LDR_PH160AS_SHEET As String = "PH160AS - CASH JOURNAL"
 Private Const LDR_TARGET_SHEET As String = "TEMPLATE"
+Private Const LDR_CODE_VERSION As String = "2026-07-23-PH160AS-v2"
 
 Private Const LDR_MODE_NORMAL As Long = 0
 Private Const LDR_MODE_MONDAY As Long = 1
@@ -207,12 +208,12 @@ Public Sub Load_PB_Differences_ValuesOnly()
 
     Select Case ph160asMode
         Case LDR_MODE_LONG_WEEKEND
-            ph160asUsdInterestAddress = "G7"
-            ph160asCadInterestAddress = "G8"
-
-        Case LDR_MODE_MONDAY
             ph160asUsdInterestAddress = "F7"
             ph160asCadInterestAddress = "F8"
+
+        Case LDR_MODE_MONDAY
+            ph160asUsdInterestAddress = "E7"
+            ph160asCadInterestAddress = "E8"
 
         Case Else
             ph160asUsdInterestAddress = "O6"
@@ -397,7 +398,7 @@ Public Sub Load_PB_Differences_ValuesOnly()
                        targetCells, targetValues, targetDetails, problems, -1
 
     ' PH160AS PB interest only:
-    ' Normal O6:O7, Monday F7:F8, Canadian long weekend G7:G8.
+    ' Normal O6:O7, Monday E7:E8, Canadian long weekend F7:F8.
     LDR_QueueFixedCell ph160asWs, loaderWs, _
                        ph160asUsdInterestAddress, "USD", _
                        "PH160AS", "PBINTEREST", _
@@ -459,6 +460,7 @@ LDR_CleanUp:
             MsgBox CStr(targetCells.Count) & _
                    " difference values were written to " & _
                    loaderWb.Name & " / " & loaderWs.Name & "." & vbCrLf & _
+                   "Code version: " & LDR_CODE_VERSION & "." & vbCrLf & _
                    "PH632M/RT684M interest source: " & _
                    interestModeText & " for " & _
                    Format$(processingDate, "yyyy-mm-dd") & "." & vbCrLf & _
@@ -709,9 +711,9 @@ End Function
 Private Function LDR_GetPH160ASProcessingDate( _
     ByVal sourceWs As Worksheet) As Date
 
-    If IsDate(sourceWs.Range("D6").Value) Then
+    If IsDate(sourceWs.Range("C6").Value) Then
         LDR_GetPH160ASProcessingDate = _
-            DateValue(sourceWs.Range("D6").Value)
+            DateValue(sourceWs.Range("C6").Value)
     Else
         LDR_GetPH160ASProcessingDate = Date
     End If
@@ -926,13 +928,15 @@ Private Function LDR_FindMatchRow(ByVal ws As Worksheet, _
     finalRow = LDR_LastUsedRow(ws)
 
     For rowNumber = headerRow + 1 To finalRow
-        If UCase$(Trim$(CStr( _
-            ws.Cells(rowNumber, entityColumn).Value2))) = UCase$(entityId) _
-           And UCase$(Trim$(CStr( _
-            ws.Cells(rowNumber, currencyColumn).Value2))) = UCase$(currencyText) _
-           And UCase$(Trim$(CStr( _
-            ws.Cells(rowNumber, annotationColumn).Value2))) = _
-            UCase$(annotationText) Then
+        If LDR_NormalizeText(CStr( _
+            ws.Cells(rowNumber, entityColumn).Value2)) = _
+            LDR_NormalizeText(entityId) _
+           And LDR_NormalizeText(CStr( _
+            ws.Cells(rowNumber, currencyColumn).Value2)) = _
+            LDR_NormalizeText(currencyText) _
+           And LDR_NormalizeText(CStr( _
+            ws.Cells(rowNumber, annotationColumn).Value2)) = _
+            LDR_NormalizeText(annotationText) Then
 
             LDR_FindMatchRow = rowNumber
             Exit Function
@@ -1110,6 +1114,7 @@ Private Function LDR_NormalizeText(ByVal textValue As String) As String
     Dim resultText As String
 
     resultText = LCase$(Trim$(textValue))
+    resultText = Replace(resultText, ChrW(160), "")
     resultText = Replace(resultText, " ", "")
     resultText = Replace(resultText, "_", "")
     resultText = Replace(resultText, "-", "")
