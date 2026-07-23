@@ -10,7 +10,7 @@ Private Const LDR_SOURCE_SHEET As String = "Scotia - RT624BSPh160CS"
 Private Const LDR_PH632_RT684_SHEET As String = "PH632-RT684"
 Private Const LDR_RT624CS_SHEET As String = "SOCGEN_RT624CS"
 Private Const LDR_PH160BS_SHEET As String = "PH191S-PH160BS"
-Private Const LDR_PH160AS_SHEET As String = "PH160AS - CASH JOURNAL"
+Private Const LDR_PH160AS_SHEET As String = "PH160AS"
 Private Const LDR_TARGET_SHEET As String = "TEMPLATE"
 
 Private Const LDR_MODE_NORMAL As Long = 0
