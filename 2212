@@ -188,9 +188,14 @@ Public Sub Load_PB_Differences_ValuesOnly()
     dateNotes = LDR_CollectDateNotes( _
         runDate, ph632Rt684Ws, rt624csWs, ph160bsWs, ph160asWs)
 
-    ' RT624CS stock loan / PB interest.
-    ' Normal: M13:M14 and N3:N8. Monday: E2:E3 and E11:E16.
-    ' Long weekend: F2:F3 and F11:F16.
+    ' Source addresses per mode.
+    '   RT624CS stock loan / PB interest:
+    '     normal M13:M14 and N3:N8, Monday E2:E3 and E11:E16,
+    '     long weekend F2:F3 and F11:F16.
+    '   PH160BS PB interest:
+    '     normal P22:P23, Monday D23:D24, long weekend E23:E24.
+    '   PH160AS PB interest:
+    '     normal O6:O7, Monday E8:E9, long weekend F8:F9.
     Select Case runMode
         Case LDR_MODE_LONG_WEEKEND
             rt624csStockColumn = "F"
@@ -199,8 +204,8 @@ Public Sub Load_PB_Differences_ValuesOnly()
             rt624csInterestFirstRow = 11
             ph160bsCadAddress = "E23"
             ph160bsUsdAddress = "E24"
-            ph160asUsdInterestAddress = "F7"
-            ph160asCadInterestAddress = "F8"
+            ph160asUsdInterestAddress = "F8"
+            ph160asCadInterestAddress = "F9"
 
         Case LDR_MODE_MONDAY
             rt624csStockColumn = "E"
@@ -209,8 +214,8 @@ Public Sub Load_PB_Differences_ValuesOnly()
             rt624csInterestFirstRow = 11
             ph160bsCadAddress = "D23"
             ph160bsUsdAddress = "D24"
-            ph160asUsdInterestAddress = "E7"
-            ph160asCadInterestAddress = "E8"
+            ph160asUsdInterestAddress = "E8"
+            ph160asCadInterestAddress = "E9"
 
         Case Else
             rt624csStockColumn = "M"
