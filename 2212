@@ -6,18 +6,8 @@ Option Explicit
 ' This macro writes VALUES ONLY to the loader AMOUNT column.
 ' It does not insert/delete rows, copy formats, or change formulas.
 '
-' Nothing is written until every mapping has been checked. Anything that
-' cannot be loaded is reported instead of being skipped silently:
-'   - a hard problem (blank currency, formula in the destination, two
-'     mappings pointing at the same cell) means the write itself would be
-'     wrong, so the run stops before the first cell is written;
-'   - a soft problem (no matching loader row, blank source cell, a source
-'     cell holding an error or text) affects one mapping only. The rest are
-'     loaded and the skipped cells are listed in the run log.
-'
-' The message box only ever says "Paste Done". The run log - mode, values
-' written, skipped cells, anything that failed - goes to the VBA Immediate
-' window, so press Ctrl+G there to see what a run actually did.
+' The message box only says "Paste Done". What a run did - the mode, the
+' values written, anything skipped - goes to the Immediate window (Ctrl+G).
 
 Private Const LDR_SOURCE_SHEET As String = "Scotia - RT624BSPh160CS"
 Private Const LDR_PH632_RT684_SHEET As String = "PH632-RT684"
@@ -30,54 +20,19 @@ Private Const LDR_MODE_NORMAL As Long = 0
 Private Const LDR_MODE_MONDAY As Long = 1
 Private Const LDR_MODE_LONG_WEEKEND As Long = 2
 
-' ---------------------------------------------------------------------------
-' Settings. These four are the only lines you should ever need to change.
-' ---------------------------------------------------------------------------
-
-' True  = a difference of 0.00 is written, which clears the amount a previous
-'         run left in that loader row.
-' False = a 0.00 difference leaves the loader cell untouched and is listed in
-'         the run log, so a stale amount is at least traceable.
-Private Const LDR_WRITE_ZERO_DIFFERENCES As Boolean = True
-
-' National Day for Truth and Reconciliation (Sep 30) and Remembrance Day
-' (Nov 11) are federal holidays but are normal business days in Ontario and
-' on the TSX. Treating them as holidays makes the following day look like a
-' long weekend and reads the wrong source column. Set to True only if your
-' process really does skip them.
-Private Const LDR_OBSERVE_SEPT30 As Boolean = False
-Private Const LDR_OBSERVE_NOV11 As Boolean = False
-
-' Set to True to check the loader workbook, the mode and the row count in a
-' confirmation box before anything is written. Off by default: the same
-' detail is in the Immediate window after every run.
-Private Const LDR_CONFIRM_BEFORE_WRITE As Boolean = False
-
-' A source cell holding an error or text cannot be loaded, but the other
-' mappings still can.
-' False = load the rest and list the cell in the run log.
-' True  = stop the whole run instead.
-Private Const LDR_STOP_ON_UNREADABLE_SOURCE As Boolean = False
-
-Private Const LDR_MAX_MESSAGE_LINES As Long = 12
-Private Const LDR_MAX_CELL_TEXT As Long = 40
-
-' Outcomes of reading a single source cell.
 Private Const LDR_READ_OK As Long = 0
 Private Const LDR_READ_BLANK As Long = 1
 Private Const LDR_READ_ERROR As Long = 2
 Private Const LDR_READ_TEXT As Long = 3
 
-' The result of reading one source cell, kept together so the queue helpers
-' can pass the reason a cell could not be used along with the value.
+Private Const LDR_MAX_CELL_TEXT As Long = 40
+
 Private Type LDR_Reading
     Status As Long
     Value As Double
     DisplayText As String
 End Type
 
-' Everything the loader side of the run needs, so the queue helpers take a
-' handful of arguments instead of fourteen.
 Private Type LDR_Context
     LoaderWs As Worksheet
     HeaderRow As Long
@@ -109,7 +64,6 @@ Public Sub Load_PB_Differences_ValuesOnly()
     Dim ph160bsWs As Worksheet
     Dim ph160asWs As Worksheet
     Dim loaderWb As Workbook
-    Dim loaderNote As String
 
     Dim runDate As Date
     Dim runMode As Long
@@ -141,10 +95,7 @@ Public Sub Load_PB_Differences_ValuesOnly()
 
     On Error GoTo LDR_Failed
 
-    ' Every exit goes through LDR_CleanUp, so the application settings are
-    ' always restored and only one message is ever shown.
     Set sourceWb = LDR_FindOrOpenSourceWorkbook()
-
     If sourceWb Is Nothing Then GoTo LDR_CleanUp
 
     Set sourceWs = LDR_RequireWorksheet(sourceWb, LDR_SOURCE_SHEET, 7100)
@@ -153,8 +104,7 @@ Public Sub Load_PB_Differences_ValuesOnly()
     Set ph160bsWs = LDR_RequireWorksheet(sourceWb, LDR_PH160BS_SHEET, 7108)
     Set ph160asWs = LDR_RequireWorksheet(sourceWb, LDR_PH160AS_SHEET, 7109)
 
-    Set loaderWb = LDR_FindOrOpenLoaderWorkbook(sourceWb, loaderNote)
-
+    Set loaderWb = LDR_FindOrOpenLoaderWorkbook(sourceWb)
     If loaderWb Is Nothing Then GoTo LDR_CleanUp
 
     If loaderWb.ReadOnly Then
@@ -173,21 +123,20 @@ Public Sub Load_PB_Differences_ValuesOnly()
 
     ' Select the daily bucket from the actual Canadian run date. The source
     ' sheets can still display the prior report date, which otherwise makes
-    ' Tuesday/Wednesday continue using the wrong weekend bucket. The same
-    ' run date drives every sheet, so the mode is resolved once.
+    ' Tuesday/Wednesday continue using the wrong weekend bucket.
     runDate = Date
     runMode = LDR_GetProcessingMode(runDate, modeText)
 
-    ' The run date is authoritative, but a run started a day late would pick
-    ' the wrong bucket without any sign of it. Compare each source sheet's own
-    ' report date against the previous business day and report a mismatch.
+    ' A run started a day late picks the wrong bucket with nothing else to
+    ' show for it, so compare each sheet's own report date with the previous
+    ' business day.
     dateNotes = LDR_CollectDateNotes( _
         runDate, ph632Rt684Ws, rt624csWs, ph160bsWs, ph160asWs)
 
-    ' Source addresses per mode. The Monday and long-weekend layouts are not
-    ' just a different column of the normal one: on PH632-RT684 they also sit
-    ' one row higher, so the rows are selected per mode rather than shared.
-    '   PH632M / RT684M PB interest (CAD first, USD on the next row):
+    ' The Monday and long-weekend layouts are not just a different column of
+    ' the normal one: on PH632-RT684 they also sit one row higher, so rows
+    ' are selected per mode rather than shared.
+    '   PH632M / RT684M PB interest, CAD first and USD on the next row:
     '     normal X3:X4 and X8:X9, Monday I2:I3 and I7:I8,
     '     long weekend J2:J3 and J7:J8.
     '   RT624CS stock loan / PB interest:
@@ -252,12 +201,9 @@ Public Sub Load_PB_Differences_ValuesOnly()
     LDR_QueueOne ctx, sourceWs, 56, "RT732AS", "PBINTEREST"
     LDR_QueueOne ctx, sourceWs, 59, "RT732BS", "PBINTEREST"
 
-    ' PH632M stock-loan differences.
     LDR_QueueFixedCell ctx, ph632Rt684Ws, "T3", "CAD", "PH632M", "STOCKLOANFEE"
     LDR_QueueFixedCell ctx, ph632Rt684Ws, "T4", "USD", "PH632M", "STOCKLOANFEE"
 
-    ' PH632M PB interest: X3:X4 normally, I2:I3 on Monday, J2:J3 after a
-    ' Canadian long weekend.
     LDR_QueueFixedCell ctx, ph632Rt684Ws, _
                        interestSourceColumn & CStr(ph632InterestFirstRow), _
                        "CAD", "PH632M", "PBINTEREST"
@@ -265,12 +211,9 @@ Public Sub Load_PB_Differences_ValuesOnly()
                        interestSourceColumn & CStr(ph632InterestFirstRow + 1), _
                        "USD", "PH632M", "PBINTEREST"
 
-    ' RT684M stock-loan differences.
     LDR_QueueFixedCell ctx, ph632Rt684Ws, "T8", "CAD", "RT684M", "STOCKLOANFEE"
     LDR_QueueFixedCell ctx, ph632Rt684Ws, "T9", "USD", "RT684M", "STOCKLOANFEE"
 
-    ' RT684M PB interest uses the same date rule: X8:X9 normally,
-    ' I7:I8 on Monday, J7:J8 after a Canadian long weekend.
     LDR_QueueFixedCell ctx, ph632Rt684Ws, _
                        interestSourceColumn & CStr(rt684InterestFirstRow), _
                        "CAD", "RT684M", "PBINTEREST"
@@ -278,7 +221,6 @@ Public Sub Load_PB_Differences_ValuesOnly()
                        interestSourceColumn & CStr(rt684InterestFirstRow + 1), _
                        "USD", "RT684M", "PBINTEREST"
 
-    ' RT624CS stock loan.
     LDR_QueueFixedCell ctx, rt624csWs, _
                        rt624csStockColumn & CStr(rt624csStockFirstRow), _
                        "JPY", "RT624CS", "STOCKLOANFEE"
@@ -298,14 +240,13 @@ Public Sub Load_PB_Differences_ValuesOnly()
                            "RT624CS", "PBINTEREST"
     Next mappingIndex
 
-    ' PH160BS PB interest.
     LDR_QueueFixedCell ctx, ph160bsWs, ph160bsCadAddress, _
                        "CAD", "PH160BS", "PBINTEREST"
     LDR_QueueFixedCell ctx, ph160bsWs, ph160bsUsdAddress, _
                        "USD", "PH160BS", "PBINTEREST"
 
-    ' PH160AS is driven directly from the four existing PH160AS
-    ' loader rows. This avoids a silent miss caused by label formatting.
+    ' PH160AS is driven directly from the four existing PH160AS loader rows.
+    ' This avoids a silent miss caused by label formatting.
     LDR_QueuePH160ASRows ctx, ph160asWs, _
                          ph160asUsdInterestAddress, _
                          ph160asCadInterestAddress
@@ -316,17 +257,10 @@ Public Sub Load_PB_Differences_ValuesOnly()
     If Len(ctx.Problems) > 0 Then
         Err.Raise vbObjectError + 7105, _
                   "Load_PB_Differences_ValuesOnly", _
-                  "Nothing was written because:" & vbCrLf & _
-                  LDR_CapText(ctx.Problems, LDR_MAX_MESSAGE_LINES)
+                  "Nothing was written because:" & vbCrLf & ctx.Problems
     End If
 
-    ' Cancelled, or nothing matched. Either way ConfirmWrite has already said
-    ' so, and no loader cell has been touched.
-    If Not LDR_ConfirmWrite( _
-        ctx, loaderWb, loaderNote, runDate, modeText, dateNotes) Then
-
-        GoTo LDR_CleanUp
-    End If
+    If ctx.TargetCells.Count = 0 Then GoTo LDR_CleanUp
 
     oldScreenUpdating = Application.ScreenUpdating
     oldEnableEvents = Application.EnableEvents
@@ -359,8 +293,6 @@ LDR_CleanUp:
 
     On Error GoTo 0
 
-    ' One box, same text, whatever happened. Anything that went wrong is in
-    ' the Immediate window (Ctrl+G).
     If Len(errorText) > 0 Then Debug.Print errorText
 
     MsgBox "Paste Done", vbInformation, "PB Loader"
@@ -370,25 +302,18 @@ LDR_CleanUp:
 LDR_Failed:
     errorText = "Loader stopped: " & Err.Description
 
-    ' Say how far the write got. Anything already written stays written.
     If writtenCount > 0 Then
-        errorText = errorText & vbCrLf & vbCrLf & _
-                    CStr(writtenCount) & " of " & _
+        errorText = errorText & vbCrLf & CStr(writtenCount) & " of " & _
                     CStr(ctx.TargetCells.Count) & _
-                    " values had already been written." & vbCrLf & _
-                    "Last mapping written: " & _
+                    " values had already been written. Last one: " & _
                     CStr(ctx.TargetDetails(writtenCount))
     End If
 
     Resume LDR_CleanUp
 End Sub
 
-' ---------------------------------------------------------------------------
-' Loader context
-' ---------------------------------------------------------------------------
-
-' Reads the loader key columns once. Every later lookup is a dictionary hit
-' instead of a fresh sweep of the sheet.
+' Reads the loader key columns once, so every later lookup is a dictionary
+' hit instead of a fresh sweep of the sheet.
 Private Sub LDR_BuildContext(ByRef ctx As LDR_Context, _
                              ByVal loaderWb As Workbook)
     Dim rowNumber As Long
@@ -454,8 +379,8 @@ Private Sub LDR_BuildContext(ByRef ctx As LDR_Context, _
 
         If Len(Replace(keyText, "|", "")) > 0 Then
             If ctx.RowIndex.Exists(keyText) Then
-                ' Only the first row of a repeated key was ever updated, so
-                ' the later ones keep the amount from an earlier run.
+                ' Only the first row of a repeated key is updated, so the
+                ' later ones keep the amount from an earlier run.
                 LDR_AddWarning ctx, _
                     "Loader rows " & CStr(ctx.RowIndex(keyText)) & " and " & _
                     CStr(rowNumber) & " have the same ENTITY ID / CURRENCY / " & _
@@ -498,10 +423,6 @@ Private Function LDR_MakeKey(ByVal entityId As String, _
                   LDR_NormalizeText(annotationText)
 End Function
 
-' ---------------------------------------------------------------------------
-' Queueing
-' ---------------------------------------------------------------------------
-
 Private Sub LDR_QueueRange(ByRef ctx As LDR_Context, _
                            ByVal sourceWs As Worksheet, _
                            ByVal firstSourceRow As Long, _
@@ -543,7 +464,6 @@ Private Sub LDR_QueueOne(ByRef ctx As LDR_Context, _
                    sourceWs.Name & "!V" & CStr(sourceRow)
 End Sub
 
-' Difference at a fixed address, currency supplied by the caller.
 Private Sub LDR_QueueFixedCell(ByRef ctx As LDR_Context, _
                                ByVal sourceWs As Worksheet, _
                                ByVal sourceAddress As String, _
@@ -616,8 +536,6 @@ Private Sub LDR_QueuePH160ASRows(ByRef ctx As LDR_Context, _
     Next offsetIndex
 End Sub
 
-' Resolves the loader row for a mapping, then hands over to the row-level
-' queue. Everything that cannot be queued is recorded, never dropped.
 Private Sub LDR_QueueValue(ByRef ctx As LDR_Context, _
                            ByVal entityId As String, _
                            ByVal currencyText As String, _
@@ -633,8 +551,6 @@ Private Sub LDR_QueueValue(ByRef ctx As LDR_Context, _
     keyText = LDR_MakeKey(entityId, currencyText, annotationText)
 
     If Not ctx.RowIndex.Exists(keyText) Then
-        ' No loader row for this combination. Not fatal, but the source value
-        ' is going nowhere and the run should say so.
         If reading.Status = LDR_READ_BLANK Then
             LDR_AddWarning ctx, detailText & _
                 " - no matching loader row (source cell is empty)."
@@ -653,42 +569,28 @@ Private Sub LDR_QueueValueAtRow(ByRef ctx As LDR_Context, _
                                 ByRef reading As LDR_Reading)
     Dim amountCell As Range
     Dim addressText As String
-    Dim reasonText As String
-
-    Select Case reading.Status
-        Case LDR_READ_ERROR
-            reasonText = "source cell holds " & reading.DisplayText
-
-        Case LDR_READ_TEXT
-            reasonText = "source cell is not a number (""" & _
-                         reading.DisplayText & """)"
-
-        Case LDR_READ_BLANK
-            reasonText = "source cell is empty"
-    End Select
 
     ' One unreadable cell is one mapping that cannot load. The others still
-    ' can, so this is reported rather than treated as a reason to stop.
-    If Len(reasonText) > 0 Then
-        If reading.Status <> LDR_READ_BLANK _
-           And LDR_STOP_ON_UNREADABLE_SOURCE Then
+    ' can, so it is recorded rather than treated as a reason to stop.
+    Select Case reading.Status
+        Case LDR_READ_ERROR
+            LDR_AddWarning ctx, detailText & " - source cell holds " & _
+                reading.DisplayText & "; loader row " & CStr(loaderRow) & _
+                " was left unchanged."
+            Exit Sub
 
-            LDR_AddProblem ctx, _
-                UCase$(Left$(reasonText, 1)) & Mid$(reasonText, 2) & _
-                ". Mapping: " & detailText & "."
-        Else
-            LDR_AddWarning ctx, detailText & " - " & reasonText & _
-                "; loader row " & CStr(loaderRow) & " was left unchanged."
-        End If
-        Exit Sub
-    End If
+        Case LDR_READ_TEXT
+            LDR_AddWarning ctx, detailText & _
+                " - source cell is not a number (""" & reading.DisplayText & _
+                """); loader row " & CStr(loaderRow) & " was left unchanged."
+            Exit Sub
 
-    If reading.Value = 0 And Not LDR_WRITE_ZERO_DIFFERENCES Then
-        LDR_AddWarning ctx, detailText & _
-            " - difference is 0.00; loader row " & CStr(loaderRow) & _
-            " was left unchanged."
-        Exit Sub
-    End If
+        Case LDR_READ_BLANK
+            LDR_AddWarning ctx, detailText & _
+                " - source cell is empty; loader row " & CStr(loaderRow) & _
+                " was left unchanged."
+            Exit Sub
+    End Select
 
     Set amountCell = ctx.LoaderWs.Cells(loaderRow, ctx.AmountColumn)
     addressText = amountCell.Address(False, False)
@@ -701,8 +603,7 @@ Private Sub LDR_QueueValueAtRow(ByRef ctx As LDR_Context, _
         Exit Sub
     End If
 
-    ' Two mappings on one cell means the second write silently replaced the
-    ' first. Stop instead, and name both mappings.
+    ' Two mappings on one cell means the second write replaces the first.
     If ctx.TargetIndex.Exists(addressText) Then
         LDR_AddProblem ctx, _
             "Two mappings both write to " & addressText & ": " & _
@@ -725,13 +626,8 @@ Private Sub LDR_AddWarning(ByRef ctx As LDR_Context, ByVal messageText As String
     ctx.WarningCount = ctx.WarningCount + 1
 End Sub
 
-' ---------------------------------------------------------------------------
-' Reading source values
-' ---------------------------------------------------------------------------
-
-' Reads one source cell and says why it could not be used, so a cell holding
-' "N/A" or a label can be named in the message rather than disappearing.
-' Takes the cell rather than its value so the displayed text is available.
+' Takes the cell rather than its value, so a cell holding "N/A" or a label
+' can be named in the log instead of disappearing.
 Private Function LDR_ReadCell(ByVal sourceCell As Range) As LDR_Reading
     Dim reading As LDR_Reading
     Dim rawValue As Variant
@@ -753,15 +649,15 @@ Private Function LDR_ReadCell(ByVal sourceCell As Range) As LDR_Reading
         Exit Function
     End If
 
-    ' Numeric text goes through the text branch below, which also handles
-    ' thousands separators and (1.23) for negatives.
+    ' Numeric text goes through the text branch, which also handles thousands
+    ' separators and (1.23) for negatives.
     If IsNumeric(rawValue) And VarType(rawValue) <> vbString Then
         reading.Value = CDbl(rawValue)
     Else
         textValue = CStr(rawValue)
 
-        ' Reports exported from other systems use a non-breaking space as a
-        ' thousands separator and a Unicode minus or dash for negatives.
+        ' Exports from other systems use a non-breaking space as a thousands
+        ' separator and a Unicode minus or dash for negatives.
         textValue = Replace(textValue, ChrW(160), "")
         textValue = Replace(textValue, ChrW(8722), "-")
         textValue = Replace(textValue, ChrW(8211), "-")
@@ -784,7 +680,6 @@ Private Function LDR_ReadCell(ByVal sourceCell As Range) As LDR_Reading
             negativeValue = True
             textValue = Mid$(textValue, 2, Len(textValue) - 2)
         ElseIf Right$(textValue, 1) = "-" Then
-            ' Trailing minus, as some report writers emit for negatives.
             negativeValue = True
             textValue = Left$(textValue, Len(textValue) - 1)
         End If
@@ -805,8 +700,6 @@ Private Function LDR_ReadCell(ByVal sourceCell As Range) As LDR_Reading
     LDR_ReadCell = reading
 End Function
 
-' Range.Text is what the user sees, including "#N/A". It falls back to the
-' stored value when the column is too narrow and Excel returns "###".
 Private Function LDR_CellText(ByVal sourceCell As Range) As String
     Dim resultText As String
 
@@ -814,6 +707,7 @@ Private Function LDR_CellText(ByVal sourceCell As Range) As String
     resultText = CStr(sourceCell.Text)
     On Error GoTo 0
 
+    ' A column too narrow to show the value gives back "###".
     If Len(Replace(resultText, "#", "")) = 0 And Len(resultText) > 1 Then
         resultText = vbNullString
     End If
@@ -830,10 +724,6 @@ Private Function LDR_ShortText(ByVal textValue As String) As String
         LDR_ShortText = textValue
     End If
 End Function
-
-' ---------------------------------------------------------------------------
-' Run date, mode and the source-sheet date cross-check
-' ---------------------------------------------------------------------------
 
 Private Function LDR_GetProcessingMode(ByVal processingDate As Date, _
                                        ByRef modeText As String) As Long
@@ -859,9 +749,8 @@ Private Function LDR_GetProcessingMode(ByVal processingDate As Date, _
     End If
 End Function
 
-' The sheets carry the report date of the previous business day. A sheet
-' showing anything else usually means the run is a day late or the wrong file
-' is open, which would read the wrong column without any other symptom.
+' The sheets carry the report date of the previous business day. Anything
+' else usually means the run is a day late or the wrong file is open.
 Private Function LDR_CollectDateNotes(ByVal runDate As Date, _
                                       ByVal ph632Rt684Ws As Worksheet, _
                                       ByVal rt624csWs As Worksheet, _
@@ -891,9 +780,8 @@ Private Sub LDR_AppendDateNote(ByRef resultText As String, _
     If sheetDate = expectedDate Then Exit Sub
 
     resultText = resultText & "- " & ws.Name & " reports " & _
-                 Format$(sheetDate, "yyyy-mm-dd") & _
-                 ", expected " & Format$(expectedDate, "yyyy-mm-dd") & _
-                 "." & vbCrLf
+                 Format$(sheetDate, "yyyy-mm-dd") & ", expected " & _
+                 Format$(expectedDate, "yyyy-mm-dd") & "." & vbCrLf
 End Sub
 
 Private Function LDR_TryGetSheetDate(ByVal ws As Worksheet, _
@@ -930,7 +818,8 @@ Private Function LDR_PreviousCanadianBusinessDay( _
     LDR_PreviousCanadianBusinessDay = resultDate
 End Function
 
-' Bank of Canada / Ontario business-day calendar.
+' Ontario / TSX business-day calendar. Sep 30 and Nov 11 are federal
+' holidays but normal business days here, so they are not listed.
 Private Function LDR_IsCanadianBankHoliday( _
     ByVal dateToCheck As Date) As Boolean
 
@@ -976,16 +865,8 @@ Private Function LDR_IsCanadianBankHoliday( _
         calendarYear, 9, vbMonday, 1) Then                          ' Labour Day
         LDR_IsCanadianBankHoliday = True
 
-    ElseIf LDR_OBSERVE_SEPT30 And calendarDate = LDR_ObservedWeekday( _
-        DateSerial(calendarYear, 9, 30)) Then                       ' Truth and Reconciliation
-        LDR_IsCanadianBankHoliday = True
-
     ElseIf calendarDate = LDR_NthWeekdayOfMonth( _
         calendarYear, 10, vbMonday, 2) Then                         ' Thanksgiving
-        LDR_IsCanadianBankHoliday = True
-
-    ElseIf LDR_OBSERVE_NOV11 And calendarDate = LDR_ObservedWeekday( _
-        DateSerial(calendarYear, 11, 11)) Then                      ' Remembrance Day
         LDR_IsCanadianBankHoliday = True
 
     ElseIf calendarDate = christmasObserved Then                    ' Christmas
@@ -1068,65 +949,6 @@ Private Function LDR_EasterSunday(ByVal calendarYear As Long) As Date
     LDR_EasterSunday = DateSerial(calendarYear, easterMonth, easterDay)
 End Function
 
-' ---------------------------------------------------------------------------
-' Messages
-' ---------------------------------------------------------------------------
-
-Private Function LDR_ConfirmWrite(ByRef ctx As LDR_Context, _
-                                  ByVal loaderWb As Workbook, _
-                                  ByVal loaderNote As String, _
-                                  ByVal runDate As Date, _
-                                  ByVal modeText As String, _
-                                  ByVal dateNotes As String) As Boolean
-    Dim messageText As String
-
-    ' Nothing matched, so there is nothing to write and nothing to confirm.
-    If ctx.TargetCells.Count = 0 Then Exit Function
-
-    If Not LDR_CONFIRM_BEFORE_WRITE Then
-        LDR_ConfirmWrite = True
-        Exit Function
-    End If
-
-    messageText = "About to write " & CStr(ctx.TargetCells.Count) & _
-                  " values to the AMOUNT column." & vbCrLf & vbCrLf & _
-                  LDR_RunHeader(loaderWb, ctx, runDate, modeText) & _
-                  "Loader picked: " & loaderNote & vbCrLf & _
-                  LDR_WarningBlock(ctx) & LDR_DateBlock(dateNotes) & _
-                  vbCrLf & "Continue?"
-
-    LDR_ConfirmWrite = (MsgBox(messageText, vbOKCancel + vbQuestion, _
-                               "PB Loader") = vbOK)
-End Function
-
-Private Function LDR_RunHeader(ByVal loaderWb As Workbook, _
-                               ByRef ctx As LDR_Context, _
-                               ByVal runDate As Date, _
-                               ByVal modeText As String) As String
-
-    LDR_RunHeader = "Loader: " & loaderWb.Name & " / " & _
-                    ctx.LoaderWs.Name & vbCrLf & _
-                    "Run date: " & Format$(runDate, "yyyy-mm-dd") & " " & _
-                    Format$(runDate, "dddd") & vbCrLf & _
-                    "Mode: " & modeText & vbCrLf
-End Function
-
-Private Function LDR_WarningBlock(ByRef ctx As LDR_Context) As String
-    If ctx.WarningCount = 0 Then Exit Function
-
-    LDR_WarningBlock = vbCrLf & "Not loaded (" & CStr(ctx.WarningCount) & "):" & _
-                       vbCrLf & LDR_CapText(ctx.Warnings, LDR_MAX_MESSAGE_LINES)
-End Function
-
-Private Function LDR_DateBlock(ByVal dateNotes As String) As String
-    If Len(dateNotes) = 0 Then Exit Function
-
-    LDR_DateBlock = vbCrLf & "Source report dates to check:" & vbCrLf & _
-                    LDR_CapText(dateNotes, LDR_MAX_MESSAGE_LINES)
-End Function
-
-' A message box cannot hold the whole run, so the detail goes to the
-' Immediate window where it can be read after the fact.
 Private Sub LDR_LogRun(ByRef ctx As LDR_Context, _
                        ByVal loaderWb As Workbook, _
                        ByVal runDate As Date, _
@@ -1162,41 +984,6 @@ Private Sub LDR_LogRun(ByRef ctx As LDR_Context, _
         Debug.Print dateNotes
     End If
 End Sub
-
-Private Function LDR_CapText(ByVal textValue As String, _
-                             ByVal maxLines As Long) As String
-    Dim lines As Variant
-    Dim lineIndex As Long
-    Dim shownCount As Long
-    Dim hiddenCount As Long
-    Dim resultText As String
-
-    If Len(textValue) = 0 Then Exit Function
-
-    lines = Split(textValue, vbCrLf)
-
-    For lineIndex = LBound(lines) To UBound(lines)
-        If Len(Trim$(CStr(lines(lineIndex)))) > 0 Then
-            If shownCount < maxLines Then
-                resultText = resultText & CStr(lines(lineIndex)) & vbCrLf
-                shownCount = shownCount + 1
-            Else
-                hiddenCount = hiddenCount + 1
-            End If
-        End If
-    Next lineIndex
-
-    If hiddenCount > 0 Then
-        resultText = resultText & "  ... and " & CStr(hiddenCount) & _
-                     " more (see the Immediate window)." & vbCrLf
-    End If
-
-    LDR_CapText = resultText
-End Function
-
-' ---------------------------------------------------------------------------
-' Sheet and workbook helpers
-' ---------------------------------------------------------------------------
 
 Private Function LDR_ColumnValues(ByVal ws As Worksheet, _
                                   ByVal columnNumber As Long, _
@@ -1277,13 +1064,10 @@ Private Function LDR_FindHeaderColumn(ByVal ws As Worksheet, _
     Next columnNumber
 End Function
 
-' Uses UsedRange rather than Range.Find so the user's next manual Find is not
+' UsedRange rather than Range.Find, so the user's next manual Find is not
 ' left with this macro's search options.
 Private Function LDR_LastUsedRow(ByVal ws As Worksheet) As Long
-    Dim usedRows As Long
-
-    usedRows = ws.UsedRange.Rows.Count
-    LDR_LastUsedRow = ws.UsedRange.Row + usedRows - 1
+    LDR_LastUsedRow = ws.UsedRange.Row + ws.UsedRange.Rows.Count - 1
 
     If LDR_LastUsedRow < 1 Then LDR_LastUsedRow = 1
 End Function
@@ -1315,7 +1099,6 @@ Private Function LDR_FindOrOpenSourceWorkbook() As Workbook
         Exit Function
     End If
 
-    ' Second preference: the workbook the user is currently viewing.
     If Not ActiveWorkbook Is Nothing Then
         Set candidateWs = LDR_GetWorksheetFlexible( _
             ActiveWorkbook, LDR_SOURCE_SHEET)
@@ -1346,12 +1129,8 @@ Private Function LDR_FindOrOpenSourceWorkbook() As Workbook
         AddToMru:=False)
 End Function
 
-' loaderNote records how the workbook was chosen, because the second and third
-' preferences can land on a workbook the user did not have in mind. It is shown
-' in the confirmation message.
 Private Function LDR_FindOrOpenLoaderWorkbook( _
-    ByVal sourceWb As Workbook, _
-    ByRef loaderNote As String) As Workbook
+    ByVal sourceWb As Workbook) As Workbook
 
     Dim wb As Workbook
     Dim candidateWs As Worksheet
@@ -1365,7 +1144,6 @@ Private Function LDR_FindOrOpenLoaderWorkbook( _
                     wb, LDR_TARGET_SHEET)
 
                 If Not candidateWs Is Nothing Then
-                    loaderNote = "open workbook named ""PB loader"""
                     Set LDR_FindOrOpenLoaderWorkbook = wb
                     Exit Function
                 End If
@@ -1379,8 +1157,6 @@ Private Function LDR_FindOrOpenLoaderWorkbook( _
             Set candidateWs = LDR_GetWorksheetFlexible(wb, LDR_TARGET_SHEET)
 
             If Not candidateWs Is Nothing Then
-                loaderNote = "open workbook with a " & LDR_TARGET_SHEET & _
-                             " tab (name does not contain ""PB loader"")"
                 Set LDR_FindOrOpenLoaderWorkbook = wb
                 Exit Function
             End If
@@ -1390,8 +1166,6 @@ Private Function LDR_FindOrOpenLoaderWorkbook( _
     selectedPath = LDR_PickWorkbook("Select the PB loader template workbook")
 
     If Len(selectedPath) = 0 Then Exit Function
-
-    loaderNote = "chosen by you in the file dialog"
 
     Set LDR_FindOrOpenLoaderWorkbook = Workbooks.Open( _
         Filename:=selectedPath, _
@@ -1436,7 +1210,7 @@ Private Function LDR_GetWorksheetFlexible(ByVal wb As Workbook, _
 End Function
 
 ' CStr on an error value raises a type mismatch, which used to surface as an
-' unrelated "Loader stopped" message when a key column held #N/A.
+' unrelated failure when a key column held #N/A.
 Private Function LDR_SafeText(ByVal rawValue As Variant) As String
     If IsError(rawValue) Then Exit Function
     If IsNull(rawValue) Then Exit Function
