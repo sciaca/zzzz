@@ -13,9 +13,11 @@ Option Explicit
 '     wrong, so the run stops before the first cell is written;
 '   - a soft problem (no matching loader row, blank source cell, a source
 '     cell holding an error or text) affects one mapping only. The rest are
-'     loaded and the skipped cells are listed both in the confirmation
-'     message and in the completion message.
-' The full run log is also written to the VBA Immediate window (Ctrl+G).
+'     loaded and the skipped cells are listed in the run log.
+'
+' The message box only ever says "Paste Done". The run log - mode, values
+' written, skipped cells, anything that failed - goes to the VBA Immediate
+' window, so press Ctrl+G there to see what a run actually did.
 
 Private Const LDR_SOURCE_SHEET As String = "Scotia - RT624BSPh160CS"
 Private Const LDR_PH632_RT684_SHEET As String = "PH632-RT684"
@@ -35,7 +37,7 @@ Private Const LDR_MODE_LONG_WEEKEND As Long = 2
 ' True  = a difference of 0.00 is written, which clears the amount a previous
 '         run left in that loader row.
 ' False = a 0.00 difference leaves the loader cell untouched and is listed in
-'         the completion message, so a stale amount is at least visible.
+'         the run log, so a stale amount is at least traceable.
 Private Const LDR_WRITE_ZERO_DIFFERENCES As Boolean = True
 
 ' National Day for Truth and Reconciliation (Sep 30) and Remembrance Day
@@ -53,8 +55,7 @@ Private Const LDR_CONFIRM_BEFORE_WRITE As Boolean = False
 
 ' A source cell holding an error or text cannot be loaded, but the other
 ' mappings still can.
-' False = load the rest and list the cell in the confirmation and completion
-'         messages, so you decide whether to go ahead.
+' False = load the rest and list the cell in the run log.
 ' True  = stop the whole run instead.
 Private Const LDR_STOP_ON_UNREADABLE_SOURCE As Boolean = False
 
@@ -137,7 +138,6 @@ Public Sub Load_PB_Differences_ValuesOnly()
     Dim oldCalculation As XlCalculation
     Dim settingsChanged As Boolean
     Dim errorText As String
-    Dim runCancelled As Boolean
 
     On Error GoTo LDR_Failed
 
@@ -145,10 +145,7 @@ Public Sub Load_PB_Differences_ValuesOnly()
     ' always restored and only one message is ever shown.
     Set sourceWb = LDR_FindOrOpenSourceWorkbook()
 
-    If sourceWb Is Nothing Then
-        runCancelled = True
-        GoTo LDR_CleanUp
-    End If
+    If sourceWb Is Nothing Then GoTo LDR_CleanUp
 
     Set sourceWs = LDR_RequireWorksheet(sourceWb, LDR_SOURCE_SHEET, 7100)
     Set ph632Rt684Ws = LDR_RequireWorksheet(sourceWb, LDR_PH632_RT684_SHEET, 7106)
@@ -158,10 +155,7 @@ Public Sub Load_PB_Differences_ValuesOnly()
 
     Set loaderWb = LDR_FindOrOpenLoaderWorkbook(sourceWb, loaderNote)
 
-    If loaderWb Is Nothing Then
-        runCancelled = True
-        GoTo LDR_CleanUp
-    End If
+    If loaderWb Is Nothing Then GoTo LDR_CleanUp
 
     If loaderWb.ReadOnly Then
         Err.Raise vbObjectError + 7101, _
@@ -331,7 +325,6 @@ Public Sub Load_PB_Differences_ValuesOnly()
     If Not LDR_ConfirmWrite( _
         ctx, loaderWb, loaderNote, runDate, modeText, dateNotes) Then
 
-        runCancelled = True
         GoTo LDR_CleanUp
     End If
 
@@ -366,11 +359,11 @@ LDR_CleanUp:
 
     On Error GoTo 0
 
-    If Len(errorText) > 0 Then
-        MsgBox errorText, vbExclamation, "PB Loader"
-    ElseIf Not runCancelled Then
-        MsgBox "Paste Done", vbInformation, "PB Loader"
-    End If
+    ' One box, same text, whatever happened. Anything that went wrong is in
+    ' the Immediate window (Ctrl+G).
+    If Len(errorText) > 0 Then Debug.Print errorText
+
+    MsgBox "Paste Done", vbInformation, "PB Loader"
 
     Exit Sub
 
@@ -1087,13 +1080,8 @@ Private Function LDR_ConfirmWrite(ByRef ctx As LDR_Context, _
                                   ByVal dateNotes As String) As Boolean
     Dim messageText As String
 
-    If ctx.TargetCells.Count = 0 Then
-        ' Saying "Paste Done" here would report success for a run that matched
-        ' nothing at all.
-        MsgBox "Nothing was written: no loader rows matched.", _
-               vbExclamation, "PB Loader"
-        Exit Function
-    End If
+    ' Nothing matched, so there is nothing to write and nothing to confirm.
+    If ctx.TargetCells.Count = 0 Then Exit Function
 
     If Not LDR_CONFIRM_BEFORE_WRITE Then
         LDR_ConfirmWrite = True
