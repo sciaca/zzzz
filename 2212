@@ -115,6 +115,8 @@ Public Sub Load_PB_Differences_ValuesOnly()
     Dim dateNotes As String
 
     Dim interestSourceColumn As String
+    Dim ph632InterestFirstRow As Long
+    Dim rt684InterestFirstRow As Long
     Dim rt624csStockColumn As String
     Dim rt624csStockFirstRow As Long
     Dim rt624csInterestColumn As String
@@ -180,7 +182,6 @@ Public Sub Load_PB_Differences_ValuesOnly()
     ' run date drives every sheet, so the mode is resolved once.
     runDate = Date
     runMode = LDR_GetProcessingMode(runDate, modeText)
-    interestSourceColumn = LDR_GetInterestSourceColumn(runMode)
 
     ' The run date is authoritative, but a run started a day late would pick
     ' the wrong bucket without any sign of it. Compare each source sheet's own
@@ -188,7 +189,12 @@ Public Sub Load_PB_Differences_ValuesOnly()
     dateNotes = LDR_CollectDateNotes( _
         runDate, ph632Rt684Ws, rt624csWs, ph160bsWs, ph160asWs)
 
-    ' Source addresses per mode.
+    ' Source addresses per mode. The Monday and long-weekend layouts are not
+    ' just a different column of the normal one: on PH632-RT684 they also sit
+    ' one row higher, so the rows are selected per mode rather than shared.
+    '   PH632M / RT684M PB interest (CAD first, USD on the next row):
+    '     normal X3:X4 and X8:X9, Monday I2:I3 and I7:I8,
+    '     long weekend J2:J3 and J7:J8.
     '   RT624CS stock loan / PB interest:
     '     normal M13:M14 and N3:N8, Monday E2:E3 and E11:E16,
     '     long weekend F2:F3 and F11:F16.
@@ -198,6 +204,9 @@ Public Sub Load_PB_Differences_ValuesOnly()
     '     normal O6:O7, Monday E8:E9, long weekend F8:F9.
     Select Case runMode
         Case LDR_MODE_LONG_WEEKEND
+            interestSourceColumn = "J"
+            ph632InterestFirstRow = 2
+            rt684InterestFirstRow = 7
             rt624csStockColumn = "F"
             rt624csStockFirstRow = 2
             rt624csInterestColumn = "F"
@@ -208,6 +217,9 @@ Public Sub Load_PB_Differences_ValuesOnly()
             ph160asCadInterestAddress = "F9"
 
         Case LDR_MODE_MONDAY
+            interestSourceColumn = "I"
+            ph632InterestFirstRow = 2
+            rt684InterestFirstRow = 7
             rt624csStockColumn = "E"
             rt624csStockFirstRow = 2
             rt624csInterestColumn = "E"
@@ -218,6 +230,9 @@ Public Sub Load_PB_Differences_ValuesOnly()
             ph160asCadInterestAddress = "E9"
 
         Case Else
+            interestSourceColumn = "X"
+            ph632InterestFirstRow = 3
+            rt684InterestFirstRow = 8
             rt624csStockColumn = "M"
             rt624csStockFirstRow = 13
             rt624csInterestColumn = "N"
@@ -246,21 +261,26 @@ Public Sub Load_PB_Differences_ValuesOnly()
     LDR_QueueFixedCell ctx, ph632Rt684Ws, "T3", "CAD", "PH632M", "STOCKLOANFEE"
     LDR_QueueFixedCell ctx, ph632Rt684Ws, "T4", "USD", "PH632M", "STOCKLOANFEE"
 
-    ' PH632M PB interest: X normally, I on Monday, J after a
+    ' PH632M PB interest: X3:X4 normally, I2:I3 on Monday, J2:J3 after a
     ' Canadian long weekend.
-    LDR_QueueFixedCell ctx, ph632Rt684Ws, interestSourceColumn & "3", _
+    LDR_QueueFixedCell ctx, ph632Rt684Ws, _
+                       interestSourceColumn & CStr(ph632InterestFirstRow), _
                        "CAD", "PH632M", "PBINTEREST"
-    LDR_QueueFixedCell ctx, ph632Rt684Ws, interestSourceColumn & "4", _
+    LDR_QueueFixedCell ctx, ph632Rt684Ws, _
+                       interestSourceColumn & CStr(ph632InterestFirstRow + 1), _
                        "USD", "PH632M", "PBINTEREST"
 
     ' RT684M stock-loan differences.
     LDR_QueueFixedCell ctx, ph632Rt684Ws, "T8", "CAD", "RT684M", "STOCKLOANFEE"
     LDR_QueueFixedCell ctx, ph632Rt684Ws, "T9", "USD", "RT684M", "STOCKLOANFEE"
 
-    ' RT684M PB interest uses the same date rule.
-    LDR_QueueFixedCell ctx, ph632Rt684Ws, interestSourceColumn & "8", _
+    ' RT684M PB interest uses the same date rule: X8:X9 normally,
+    ' I7:I8 on Monday, J7:J8 after a Canadian long weekend.
+    LDR_QueueFixedCell ctx, ph632Rt684Ws, _
+                       interestSourceColumn & CStr(rt684InterestFirstRow), _
                        "CAD", "RT684M", "PBINTEREST"
-    LDR_QueueFixedCell ctx, ph632Rt684Ws, interestSourceColumn & "9", _
+    LDR_QueueFixedCell ctx, ph632Rt684Ws, _
+                       interestSourceColumn & CStr(rt684InterestFirstRow + 1), _
                        "USD", "RT684M", "PBINTEREST"
 
     ' RT624CS stock loan.
@@ -822,19 +842,6 @@ End Function
 ' ---------------------------------------------------------------------------
 ' Run date, mode and the source-sheet date cross-check
 ' ---------------------------------------------------------------------------
-
-Private Function LDR_GetInterestSourceColumn(ByVal processingMode As Long) As String
-    Select Case processingMode
-        Case LDR_MODE_LONG_WEEKEND
-            LDR_GetInterestSourceColumn = "J"
-
-        Case LDR_MODE_MONDAY
-            LDR_GetInterestSourceColumn = "I"
-
-        Case Else
-            LDR_GetInterestSourceColumn = "X"
-    End Select
-End Function
 
 Private Function LDR_GetProcessingMode(ByVal processingDate As Date, _
                                        ByRef modeText As String) As Long
