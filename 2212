@@ -46,9 +46,10 @@ Private Const LDR_WRITE_ZERO_DIFFERENCES As Boolean = True
 Private Const LDR_OBSERVE_SEPT30 As Boolean = False
 Private Const LDR_OBSERVE_NOV11 As Boolean = False
 
-' Show the loader workbook, the mode and the row count for confirmation
-' before anything is written.
-Private Const LDR_CONFIRM_BEFORE_WRITE As Boolean = True
+' Set to True to check the loader workbook, the mode and the row count in a
+' confirmation box before anything is written. Off by default: the same
+' detail is in the Immediate window after every run.
+Private Const LDR_CONFIRM_BEFORE_WRITE As Boolean = False
 
 ' A source cell holding an error or text cannot be loaded, but the other
 ' mappings still can.
@@ -368,9 +369,7 @@ LDR_CleanUp:
     If Len(errorText) > 0 Then
         MsgBox errorText, vbExclamation, "PB Loader"
     ElseIf Not runCancelled Then
-        MsgBox LDR_BuildSummary( _
-            ctx, loaderWb, runDate, modeText, dateNotes, writtenCount), _
-            vbInformation, "PB Loader"
+        MsgBox LDR_BuildSummary(ctx), vbInformation, "PB Loader"
     End If
 
     Exit Sub
@@ -1091,10 +1090,7 @@ Private Function LDR_ConfirmWrite(ByRef ctx As LDR_Context, _
     If ctx.TargetCells.Count = 0 Then
         ' Saying "Paste Done" here would report success for a run that matched
         ' nothing at all.
-        MsgBox "No loader rows were matched, so nothing was written." & _
-               vbCrLf & vbCrLf & _
-               LDR_RunHeader(loaderWb, ctx, runDate, modeText) & _
-               LDR_WarningBlock(ctx) & LDR_DateBlock(dateNotes), _
+        MsgBox "Nothing was written: no loader rows matched.", _
                vbExclamation, "PB Loader"
         Exit Function
     End If
@@ -1115,18 +1111,17 @@ Private Function LDR_ConfirmWrite(ByRef ctx As LDR_Context, _
                                "PB Loader") = vbOK)
 End Function
 
-Private Function LDR_BuildSummary(ByRef ctx As LDR_Context, _
-                                  ByVal loaderWb As Workbook, _
-                                  ByVal runDate As Date, _
-                                  ByVal modeText As String, _
-                                  ByVal dateNotes As String, _
-                                  ByVal writtenCount As Long) As String
+' Deliberately short. The mode, the values written and the skipped cells are
+' all in the Immediate window, so the box only has to say it finished and
+' whether anything needs a look.
+Private Function LDR_BuildSummary(ByRef ctx As LDR_Context) As String
+    LDR_BuildSummary = "Paste Done"
 
-    LDR_BuildSummary = "Paste Done" & vbCrLf & vbCrLf & _
-                       LDR_RunHeader(loaderWb, ctx, runDate, modeText) & _
-                       "Values written: " & CStr(writtenCount) & vbCrLf & _
-                       LDR_WarningBlock(ctx) & LDR_DateBlock(dateNotes) & _
-                       vbCrLf & "Full run log: VBA Immediate window (Ctrl+G)."
+    If ctx.WarningCount > 0 Then
+        LDR_BuildSummary = LDR_BuildSummary & vbCrLf & vbCrLf & _
+                           CStr(ctx.WarningCount) & " not loaded. Ctrl+G in " & _
+                           "the VBA window for the list."
+    End If
 End Function
 
 Private Function LDR_RunHeader(ByVal loaderWb As Workbook, _
