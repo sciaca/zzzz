@@ -369,7 +369,7 @@ LDR_CleanUp:
     If Len(errorText) > 0 Then
         MsgBox errorText, vbExclamation, "PB Loader"
     ElseIf Not runCancelled Then
-        MsgBox LDR_BuildSummary(ctx), vbInformation, "PB Loader"
+        MsgBox "Paste Done", vbInformation, "PB Loader"
     End If
 
     Exit Sub
@@ -1109,19 +1109,6 @@ Private Function LDR_ConfirmWrite(ByRef ctx As LDR_Context, _
 
     LDR_ConfirmWrite = (MsgBox(messageText, vbOKCancel + vbQuestion, _
                                "PB Loader") = vbOK)
-End Function
-
-' Deliberately short. The mode, the values written and the skipped cells are
-' all in the Immediate window, so the box only has to say it finished and
-' whether anything needs a look.
-Private Function LDR_BuildSummary(ByRef ctx As LDR_Context) As String
-    LDR_BuildSummary = "Paste Done"
-
-    If ctx.WarningCount > 0 Then
-        LDR_BuildSummary = LDR_BuildSummary & vbCrLf & vbCrLf & _
-                           CStr(ctx.WarningCount) & " not loaded. Ctrl+G in " & _
-                           "the VBA window for the list."
-    End If
 End Function
 
 Private Function LDR_RunHeader(ByVal loaderWb As Workbook, _
