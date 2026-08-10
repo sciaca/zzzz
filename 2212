@@ -8,11 +8,13 @@ Option Explicit
 '
 ' Nothing is written until every mapping has been checked. Anything that
 ' cannot be loaded is reported instead of being skipped silently:
-'   - a hard problem (error value in the source, blank currency, formula in
-'     the destination, two mappings pointing at the same cell) stops the run
-'     before the first cell is written;
-'   - a soft problem (no matching loader row, blank source cell) is loaded
-'     around and listed in the completion message.
+'   - a hard problem (blank currency, formula in the destination, two
+'     mappings pointing at the same cell) means the write itself would be
+'     wrong, so the run stops before the first cell is written;
+'   - a soft problem (no matching loader row, blank source cell, a source
+'     cell holding an error or text) affects one mapping only. The rest are
+'     loaded and the skipped cells are listed both in the confirmation
+'     message and in the completion message.
 ' The full run log is also written to the VBA Immediate window (Ctrl+G).
 
 Private Const LDR_SOURCE_SHEET As String = "Scotia - RT624BSPh160CS"
@@ -48,13 +50,29 @@ Private Const LDR_OBSERVE_NOV11 As Boolean = False
 ' before anything is written.
 Private Const LDR_CONFIRM_BEFORE_WRITE As Boolean = True
 
+' A source cell holding an error or text cannot be loaded, but the other
+' mappings still can.
+' False = load the rest and list the cell in the confirmation and completion
+'         messages, so you decide whether to go ahead.
+' True  = stop the whole run instead.
+Private Const LDR_STOP_ON_UNREADABLE_SOURCE As Boolean = False
+
 Private Const LDR_MAX_MESSAGE_LINES As Long = 12
+Private Const LDR_MAX_CELL_TEXT As Long = 40
 
 ' Outcomes of reading a single source cell.
 Private Const LDR_READ_OK As Long = 0
 Private Const LDR_READ_BLANK As Long = 1
 Private Const LDR_READ_ERROR As Long = 2
 Private Const LDR_READ_TEXT As Long = 3
+
+' The result of reading one source cell, kept together so the queue helpers
+' can pass the reason a cell could not be used along with the value.
+Private Type LDR_Reading
+    Status As Long
+    Value As Double
+    DisplayText As String
+End Type
 
 ' Everything the loader side of the run needs, so the queue helpers take a
 ' handful of arguments instead of fourteen.
@@ -486,21 +504,17 @@ Private Sub LDR_QueueOne(ByRef ctx As LDR_Context, _
                          ByVal sourceRow As Long, _
                          ByVal entityId As String, _
                          ByVal annotationText As String)
-    Dim rawValue As Variant
-    Dim rawCurrency As Variant
+    Dim reading As LDR_Reading
     Dim currencyText As String
-    Dim readStatus As Long
-    Dim differenceValue As Double
 
-    rawValue = sourceWs.Range("V" & CStr(sourceRow)).Value2
-    rawCurrency = sourceWs.Range("S" & CStr(sourceRow)).Value2
-    currencyText = UCase$(Trim$(LDR_SafeText(rawCurrency)))
+    currencyText = UCase$(Trim$(LDR_SafeText( _
+        sourceWs.Range("S" & CStr(sourceRow)).Value2)))
 
-    readStatus = LDR_ReadDifference(rawValue, differenceValue)
+    reading = LDR_ReadCell(sourceWs.Range("V" & CStr(sourceRow)))
 
     ' A row with neither a currency nor a difference is an unused row in the
     ' source block, not a mapping that went missing.
-    If Len(currencyText) = 0 And readStatus = LDR_READ_BLANK Then Exit Sub
+    If Len(currencyText) = 0 And reading.Status = LDR_READ_BLANK Then Exit Sub
 
     If Len(currencyText) = 0 Then
         LDR_AddProblem ctx, _
@@ -508,8 +522,7 @@ Private Sub LDR_QueueOne(ByRef ctx As LDR_Context, _
         Exit Sub
     End If
 
-    LDR_QueueValue ctx, entityId, currencyText, annotationText, _
-                   readStatus, differenceValue, _
+    LDR_QueueValue ctx, entityId, currencyText, annotationText, reading, _
                    sourceWs.Name & "!V" & CStr(sourceRow)
 End Sub
 
@@ -520,15 +533,12 @@ Private Sub LDR_QueueFixedCell(ByRef ctx As LDR_Context, _
                                ByVal currencyText As String, _
                                ByVal entityId As String, _
                                ByVal annotationText As String)
-    Dim readStatus As Long
-    Dim differenceValue As Double
+    Dim reading As LDR_Reading
 
-    readStatus = LDR_ReadDifference( _
-        sourceWs.Range(sourceAddress).Value2, differenceValue)
+    reading = LDR_ReadCell(sourceWs.Range(sourceAddress))
 
     LDR_QueueValue ctx, entityId, UCase$(Trim$(currencyText)), annotationText, _
-                   readStatus, differenceValue, _
-                   sourceWs.Name & "!" & sourceAddress
+                   reading, sourceWs.Name & "!" & sourceAddress
 End Sub
 
 Private Sub LDR_QueuePH160ASRows(ByRef ctx As LDR_Context, _
@@ -541,8 +551,7 @@ Private Sub LDR_QueuePH160ASRows(ByRef ctx As LDR_Context, _
     Dim currencyText As String
     Dim annotationText As String
     Dim sourceAddress As String
-    Dim readStatus As Long
-    Dim differenceValue As Double
+    Dim reading As LDR_Reading
 
     If ctx.LastRow < ctx.FirstDataRow Then Exit Sub
 
@@ -579,13 +588,12 @@ Private Sub LDR_QueuePH160ASRows(ByRef ctx As LDR_Context, _
             End If
 
             If Len(sourceAddress) > 0 Then
-                readStatus = LDR_ReadDifference( _
-                    sourceWs.Range(sourceAddress).Value2, differenceValue)
+                reading = LDR_ReadCell(sourceWs.Range(sourceAddress))
 
                 LDR_QueueValueAtRow ctx, rowNumber, _
                     "PH160AS / " & currencyText & " / " & annotationText & _
                     " from " & sourceWs.Name & "!" & sourceAddress, _
-                    readStatus, differenceValue
+                    reading
             End If
         End If
     Next offsetIndex
@@ -597,8 +605,7 @@ Private Sub LDR_QueueValue(ByRef ctx As LDR_Context, _
                            ByVal entityId As String, _
                            ByVal currencyText As String, _
                            ByVal annotationText As String, _
-                           ByVal readStatus As Long, _
-                           ByVal differenceValue As Double, _
+                           ByRef reading As LDR_Reading, _
                            ByVal sourceLabel As String)
     Dim keyText As String
     Dim detailText As String
@@ -611,7 +618,7 @@ Private Sub LDR_QueueValue(ByRef ctx As LDR_Context, _
     If Not ctx.RowIndex.Exists(keyText) Then
         ' No loader row for this combination. Not fatal, but the source value
         ' is going nowhere and the run should say so.
-        If readStatus = LDR_READ_BLANK Then
+        If reading.Status = LDR_READ_BLANK Then
             LDR_AddWarning ctx, detailText & _
                 " - no matching loader row (source cell is empty)."
         Else
@@ -620,37 +627,46 @@ Private Sub LDR_QueueValue(ByRef ctx As LDR_Context, _
         Exit Sub
     End If
 
-    LDR_QueueValueAtRow ctx, ctx.RowIndex(keyText), detailText, _
-                        readStatus, differenceValue
+    LDR_QueueValueAtRow ctx, ctx.RowIndex(keyText), detailText, reading
 End Sub
 
 Private Sub LDR_QueueValueAtRow(ByRef ctx As LDR_Context, _
                                 ByVal loaderRow As Long, _
                                 ByVal detailText As String, _
-                                ByVal readStatus As Long, _
-                                ByVal differenceValue As Double)
+                                ByRef reading As LDR_Reading)
     Dim amountCell As Range
     Dim addressText As String
+    Dim reasonText As String
 
-    Select Case readStatus
+    Select Case reading.Status
         Case LDR_READ_ERROR
-            LDR_AddProblem ctx, _
-                "Source cell holds an error value. Mapping: " & detailText & "."
-            Exit Sub
+            reasonText = "source cell holds " & reading.DisplayText
 
         Case LDR_READ_TEXT
-            LDR_AddProblem ctx, _
-                "Source cell is not a number. Mapping: " & detailText & "."
-            Exit Sub
+            reasonText = "source cell is not a number (""" & _
+                         reading.DisplayText & """)"
 
         Case LDR_READ_BLANK
-            LDR_AddWarning ctx, detailText & _
-                " - source cell is empty; loader row " & CStr(loaderRow) & _
-                " was left unchanged."
-            Exit Sub
+            reasonText = "source cell is empty"
     End Select
 
-    If differenceValue = 0 And Not LDR_WRITE_ZERO_DIFFERENCES Then
+    ' One unreadable cell is one mapping that cannot load. The others still
+    ' can, so this is reported rather than treated as a reason to stop.
+    If Len(reasonText) > 0 Then
+        If reading.Status <> LDR_READ_BLANK _
+           And LDR_STOP_ON_UNREADABLE_SOURCE Then
+
+            LDR_AddProblem ctx, _
+                UCase$(Left$(reasonText, 1)) & Mid$(reasonText, 2) & _
+                ". Mapping: " & detailText & "."
+        Else
+            LDR_AddWarning ctx, detailText & " - " & reasonText & _
+                "; loader row " & CStr(loaderRow) & " was left unchanged."
+        End If
+        Exit Sub
+    End If
+
+    If reading.Value = 0 And Not LDR_WRITE_ZERO_DIFFERENCES Then
         LDR_AddWarning ctx, detailText & _
             " - difference is 0.00; loader row " & CStr(loaderRow) & _
             " was left unchanged."
@@ -679,7 +695,7 @@ Private Sub LDR_QueueValueAtRow(ByRef ctx As LDR_Context, _
 
     ctx.TargetIndex.Add addressText, detailText
     ctx.TargetCells.Add amountCell
-    ctx.TargetValues.Add differenceValue
+    ctx.TargetValues.Add reading.Value
     ctx.TargetDetails.Add detailText
 End Sub
 
@@ -696,36 +712,52 @@ End Sub
 ' Reading source values
 ' ---------------------------------------------------------------------------
 
-' Returns one of the LDR_READ_* outcomes so the caller can tell an empty cell
-' apart from #N/A or from text that is not a number.
-Private Function LDR_ReadDifference(ByVal rawValue As Variant, _
-                                    ByRef resultValue As Double) As Long
+' Reads one source cell and says why it could not be used, so a cell holding
+' "N/A" or a label can be named in the message rather than disappearing.
+' Takes the cell rather than its value so the displayed text is available.
+Private Function LDR_ReadCell(ByVal sourceCell As Range) As LDR_Reading
+    Dim reading As LDR_Reading
+    Dim rawValue As Variant
     Dim textValue As String
     Dim negativeValue As Boolean
 
-    resultValue = 0
+    rawValue = sourceCell.Value2
 
     If IsError(rawValue) Then
-        LDR_ReadDifference = LDR_READ_ERROR
+        reading.Status = LDR_READ_ERROR
+        reading.DisplayText = LDR_CellText(sourceCell)
+        LDR_ReadCell = reading
         Exit Function
     End If
 
     If IsEmpty(rawValue) Or IsNull(rawValue) Then
-        LDR_ReadDifference = LDR_READ_BLANK
+        reading.Status = LDR_READ_BLANK
+        LDR_ReadCell = reading
         Exit Function
     End If
 
     ' Numeric text goes through the text branch below, which also handles
     ' thousands separators and (1.23) for negatives.
     If IsNumeric(rawValue) And VarType(rawValue) <> vbString Then
-        resultValue = CDbl(rawValue)
+        reading.Value = CDbl(rawValue)
     Else
-        textValue = Trim$(CStr(rawValue))
+        textValue = CStr(rawValue)
+
+        ' Reports exported from other systems use a non-breaking space as a
+        ' thousands separator and a Unicode minus or dash for negatives.
+        textValue = Replace(textValue, ChrW(160), "")
+        textValue = Replace(textValue, ChrW(8722), "-")
+        textValue = Replace(textValue, ChrW(8211), "-")
+        textValue = Replace(textValue, ChrW(8212), "-")
+        textValue = Trim$(textValue)
 
         If Len(textValue) = 0 Or textValue = "-" Then
-            LDR_ReadDifference = LDR_READ_BLANK
+            reading.Status = LDR_READ_BLANK
+            LDR_ReadCell = reading
             Exit Function
         End If
+
+        reading.DisplayText = LDR_ShortText(textValue)
 
         textValue = Replace(textValue, ",", "")
         textValue = Replace(textValue, "$", "")
@@ -734,19 +766,52 @@ Private Function LDR_ReadDifference(ByVal rawValue As Variant, _
         If Left$(textValue, 1) = "(" And Right$(textValue, 1) = ")" Then
             negativeValue = True
             textValue = Mid$(textValue, 2, Len(textValue) - 2)
+        ElseIf Right$(textValue, 1) = "-" Then
+            ' Trailing minus, as some report writers emit for negatives.
+            negativeValue = True
+            textValue = Left$(textValue, Len(textValue) - 1)
         End If
 
         If Not IsNumeric(textValue) Then
-            LDR_ReadDifference = LDR_READ_TEXT
+            reading.Status = LDR_READ_TEXT
+            LDR_ReadCell = reading
             Exit Function
         End If
 
-        resultValue = CDbl(textValue)
-        If negativeValue Then resultValue = -resultValue
+        reading.Value = CDbl(textValue)
+        If negativeValue Then reading.Value = -reading.Value
+        reading.DisplayText = vbNullString
     End If
 
-    resultValue = Application.WorksheetFunction.Round(resultValue, 2)
-    LDR_ReadDifference = LDR_READ_OK
+    reading.Value = Application.WorksheetFunction.Round(reading.Value, 2)
+    reading.Status = LDR_READ_OK
+    LDR_ReadCell = reading
+End Function
+
+' Range.Text is what the user sees, including "#N/A". It falls back to the
+' stored value when the column is too narrow and Excel returns "###".
+Private Function LDR_CellText(ByVal sourceCell As Range) As String
+    Dim resultText As String
+
+    On Error Resume Next
+    resultText = CStr(sourceCell.Text)
+    On Error GoTo 0
+
+    If Len(Replace(resultText, "#", "")) = 0 And Len(resultText) > 1 Then
+        resultText = vbNullString
+    End If
+
+    If Len(resultText) = 0 Then resultText = "an error value"
+
+    LDR_CellText = LDR_ShortText(resultText)
+End Function
+
+Private Function LDR_ShortText(ByVal textValue As String) As String
+    If Len(textValue) > LDR_MAX_CELL_TEXT Then
+        LDR_ShortText = Left$(textValue, LDR_MAX_CELL_TEXT) & "..."
+    Else
+        LDR_ShortText = textValue
+    End If
 End Function
 
 ' ---------------------------------------------------------------------------
