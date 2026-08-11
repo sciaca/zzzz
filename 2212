@@ -5,6 +5,9 @@ Option Explicit
 '
 ' This macro writes VALUES ONLY to the loader AMOUNT column.
 ' It does not insert/delete rows, copy formats, or change formulas.
+'
+' The message box only says "Paste Done". What a run did - the mode, the
+' values written, anything skipped - goes to the Immediate window (Ctrl+G).
 
 Private Const LDR_SOURCE_SHEET As String = "Scotia - RT624BSPh160CS"
 Private Const LDR_PH632_RT684_SHEET As String = "PH632-RT684"
@@ -17,7 +20,43 @@ Private Const LDR_MODE_NORMAL As Long = 0
 Private Const LDR_MODE_MONDAY As Long = 1
 Private Const LDR_MODE_LONG_WEEKEND As Long = 2
 
+Private Const LDR_READ_OK As Long = 0
+Private Const LDR_READ_BLANK As Long = 1
+Private Const LDR_READ_ERROR As Long = 2
+Private Const LDR_READ_TEXT As Long = 3
+
+Private Const LDR_MAX_CELL_TEXT As Long = 40
+
+Private Type LDR_Reading
+    Status As Long
+    Value As Double
+    DisplayText As String
+End Type
+
+Private Type LDR_Context
+    LoaderWs As Worksheet
+    HeaderRow As Long
+    FirstDataRow As Long
+    LastRow As Long
+    EntityColumn As Long
+    AmountColumn As Long
+    CurrencyColumn As Long
+    AnnotationColumn As Long
+    EntityValues As Variant
+    CurrencyValues As Variant
+    AnnotationValues As Variant
+    RowIndex As Object
+    TargetIndex As Object
+    TargetCells As Collection
+    TargetValues As Collection
+    TargetDetails As Collection
+    Problems As String
+    Warnings As String
+    WarningCount As Long
+End Type
+
 Public Sub Load_PB_Differences_ValuesOnly()
+    Dim ctx As LDR_Context
     Dim sourceWb As Workbook
     Dim sourceWs As Worksheet
     Dim ph632Rt684Ws As Worksheet
@@ -25,98 +64,48 @@ Public Sub Load_PB_Differences_ValuesOnly()
     Dim ph160bsWs As Worksheet
     Dim ph160asWs As Worksheet
     Dim loaderWb As Workbook
-    Dim loaderWs As Worksheet
 
-    Dim headerRow As Long
-    Dim entityColumn As Long
-    Dim amountColumn As Long
-    Dim currencyColumn As Long
-    Dim annotationColumn As Long
+    Dim runDate As Date
+    Dim runMode As Long
+    Dim modeText As String
+    Dim dateNotes As String
 
-    Dim targetCells As Collection
-    Dim targetValues As Collection
-    Dim targetDetails As Collection
-    Dim problems As String
     Dim interestSourceColumn As String
-    Dim interestModeText As String
-    Dim processingDate As Date
-    Dim rt624csProcessingDate As Date
-    Dim rt624csMode As Long
-    Dim rt624csModeText As String
+    Dim ph632InterestFirstRow As Long
+    Dim rt684InterestFirstRow As Long
     Dim rt624csStockColumn As String
     Dim rt624csStockFirstRow As Long
     Dim rt624csInterestColumn As String
     Dim rt624csInterestFirstRow As Long
     Dim rt624csCurrencies As Variant
     Dim mappingIndex As Long
-    Dim ph160bsProcessingDate As Date
-    Dim ph160bsMode As Long
-    Dim ph160bsModeText As String
     Dim ph160bsCadAddress As String
     Dim ph160bsUsdAddress As String
-    Dim ph160asProcessingDate As Date
-    Dim ph160asMode As Long
-    Dim ph160asModeText As String
     Dim ph160asUsdInterestAddress As String
     Dim ph160asCadInterestAddress As String
 
     Dim i As Long
+    Dim writtenCount As Long
     Dim targetCell As Range
     Dim oldScreenUpdating As Boolean
     Dim oldEnableEvents As Boolean
+    Dim oldCalculation As XlCalculation
     Dim settingsChanged As Boolean
     Dim errorText As String
 
     On Error GoTo LDR_Failed
 
     Set sourceWb = LDR_FindOrOpenSourceWorkbook()
-    If sourceWb Is Nothing Then Exit Sub
+    If sourceWb Is Nothing Then GoTo LDR_CleanUp
 
-    Set sourceWs = LDR_GetWorksheetFlexible(sourceWb, LDR_SOURCE_SHEET)
-    If sourceWs Is Nothing Then
-        Err.Raise vbObjectError + 7100, _
-                  "Load_PB_Differences_ValuesOnly", _
-                  "Source tab not found: " & LDR_SOURCE_SHEET
-    End If
-
-    Set ph632Rt684Ws = LDR_GetWorksheetFlexible( _
-        sourceWb, LDR_PH632_RT684_SHEET)
-
-    If ph632Rt684Ws Is Nothing Then
-        Err.Raise vbObjectError + 7106, _
-                  "Load_PB_Differences_ValuesOnly", _
-                  "Source tab not found: " & LDR_PH632_RT684_SHEET
-    End If
-
-    Set rt624csWs = LDR_GetWorksheetFlexible( _
-        sourceWb, LDR_RT624CS_SHEET)
-
-    If rt624csWs Is Nothing Then
-        Err.Raise vbObjectError + 7107, _
-                  "Load_PB_Differences_ValuesOnly", _
-                  "Source tab not found: " & LDR_RT624CS_SHEET
-    End If
-
-    Set ph160bsWs = LDR_GetWorksheetFlexible( _
-        sourceWb, LDR_PH160BS_SHEET)
-
-    If ph160bsWs Is Nothing Then
-        Err.Raise vbObjectError + 7108, _
-                  "Load_PB_Differences_ValuesOnly", _
-                  "Source tab not found: " & LDR_PH160BS_SHEET
-    End If
-
-    Set ph160asWs = LDR_GetWorksheetFlexible( _
-        sourceWb, LDR_PH160AS_SHEET)
-
-    If ph160asWs Is Nothing Then
-        Err.Raise vbObjectError + 7109, _
-                  "Load_PB_Differences_ValuesOnly", _
-                  "Source tab not found: " & LDR_PH160AS_SHEET
-    End If
+    Set sourceWs = LDR_RequireWorksheet(sourceWb, LDR_SOURCE_SHEET, 7100)
+    Set ph632Rt684Ws = LDR_RequireWorksheet(sourceWb, LDR_PH632_RT684_SHEET, 7106)
+    Set rt624csWs = LDR_RequireWorksheet(sourceWb, LDR_RT624CS_SHEET, 7107)
+    Set ph160bsWs = LDR_RequireWorksheet(sourceWb, LDR_PH160BS_SHEET, 7108)
+    Set ph160asWs = LDR_RequireWorksheet(sourceWb, LDR_PH160AS_SHEET, 7109)
 
     Set loaderWb = LDR_FindOrOpenLoaderWorkbook(sourceWb)
-    If loaderWb Is Nothing Then Exit Sub
+    If loaderWb Is Nothing Then GoTo LDR_CleanUp
 
     If loaderWb.ReadOnly Then
         Err.Raise vbObjectError + 7101, _
@@ -124,30 +113,7 @@ Public Sub Load_PB_Differences_ValuesOnly()
                   "PB Loader workbook is read-only."
     End If
 
-    Set loaderWs = LDR_GetWorksheetFlexible(loaderWb, LDR_TARGET_SHEET)
-    If loaderWs Is Nothing Then
-        Err.Raise vbObjectError + 7102, _
-                  "Load_PB_Differences_ValuesOnly", _
-                  "Loader tab not found: " & LDR_TARGET_SHEET
-    End If
-
-    If loaderWs.ProtectContents Then
-        Err.Raise vbObjectError + 7103, _
-                  "Load_PB_Differences_ValuesOnly", _
-                  "Loader tab is protected: " & loaderWs.Name
-    End If
-
-    headerRow = LDR_FindHeaderRow(loaderWs)
-    If headerRow = 0 Then
-        Err.Raise vbObjectError + 7104, _
-                  "Load_PB_Differences_ValuesOnly", _
-                  "ENTITY ID / AMOUNT / CURRENCY / ANNOTATION headers were not found."
-    End If
-
-    entityColumn = LDR_FindHeaderColumn(loaderWs, headerRow, "entityid")
-    amountColumn = LDR_FindHeaderColumn(loaderWs, headerRow, "amount")
-    currencyColumn = LDR_FindHeaderColumn(loaderWs, headerRow, "currency")
-    annotationColumn = LDR_FindHeaderColumn(loaderWs, headerRow, "annotation")
+    LDR_BuildContext ctx, loaderWb
 
     sourceWs.Calculate
     ph632Rt684Ws.Calculate
@@ -158,481 +124,388 @@ Public Sub Load_PB_Differences_ValuesOnly()
     ' Select the daily bucket from the actual Canadian run date. The source
     ' sheets can still display the prior report date, which otherwise makes
     ' Tuesday/Wednesday continue using the wrong weekend bucket.
-    processingDate = Date
-    interestSourceColumn = LDR_GetInterestSourceColumn( _
-        processingDate, interestModeText)
+    runDate = Date
+    runMode = LDR_GetProcessingMode(runDate, modeText)
 
-    ' SOCGEN's Monday sheet still carries the prior Friday report date in
-    ' B1/B10. Select NORMAL / MONDAY / LONG WKD from the actual run date;
-    ' otherwise a Monday run is incorrectly treated as a normal Friday.
-    rt624csProcessingDate = Date
-    rt624csMode = LDR_GetProcessingMode( _
-        rt624csProcessingDate, rt624csModeText)
+    ' A run started a day late picks the wrong bucket with nothing else to
+    ' show for it, so compare each sheet's own report date with the previous
+    ' business day.
+    dateNotes = LDR_CollectDateNotes( _
+        runDate, ph632Rt684Ws, rt624csWs, ph160bsWs, ph160asWs)
 
-    Select Case rt624csMode
+    ' The Monday and long-weekend layouts are not just a different column of
+    ' the normal one: on PH632-RT684 they also sit one row higher, so rows
+    ' are selected per mode rather than shared.
+    '   PH632M / RT684M PB interest, CAD first and USD on the next row:
+    '     normal X3:X4 and X8:X9, Monday I2:I3 and I7:I8,
+    '     long weekend J2:J3 and J7:J8.
+    '   RT624CS stock loan / PB interest:
+    '     normal M13:M14 and N3:N8, Monday E2:E3 and E11:E16,
+    '     long weekend F2:F3 and F11:F16.
+    '   PH160BS PB interest:
+    '     normal P22:P23, Monday D23:D24, long weekend E23:E24.
+    '   PH160AS PB interest:
+    '     normal O6:O7, Monday E8:E9, long weekend F8:F9.
+    Select Case runMode
         Case LDR_MODE_LONG_WEEKEND
+            interestSourceColumn = "J"
+            ph632InterestFirstRow = 2
+            rt684InterestFirstRow = 7
             rt624csStockColumn = "F"
             rt624csStockFirstRow = 2
             rt624csInterestColumn = "F"
             rt624csInterestFirstRow = 11
+            ph160bsCadAddress = "E23"
+            ph160bsUsdAddress = "E24"
+            ph160asUsdInterestAddress = "F8"
+            ph160asCadInterestAddress = "F9"
 
         Case LDR_MODE_MONDAY
+            interestSourceColumn = "I"
+            ph632InterestFirstRow = 2
+            rt684InterestFirstRow = 7
             rt624csStockColumn = "E"
             rt624csStockFirstRow = 2
             rt624csInterestColumn = "E"
             rt624csInterestFirstRow = 11
+            ph160bsCadAddress = "D23"
+            ph160bsUsdAddress = "D24"
+            ph160asUsdInterestAddress = "E8"
+            ph160asCadInterestAddress = "E9"
 
         Case Else
+            interestSourceColumn = "X"
+            ph632InterestFirstRow = 3
+            rt684InterestFirstRow = 8
             rt624csStockColumn = "M"
             rt624csStockFirstRow = 13
             rt624csInterestColumn = "N"
             rt624csInterestFirstRow = 3
-    End Select
-
-    ph160bsProcessingDate = Date
-    ph160bsMode = LDR_GetProcessingMode( _
-        ph160bsProcessingDate, ph160bsModeText)
-
-    Select Case ph160bsMode
-        Case LDR_MODE_LONG_WEEKEND
-            ph160bsCadAddress = "E23"
-            ph160bsUsdAddress = "E24"
-
-        Case LDR_MODE_MONDAY
-            ph160bsCadAddress = "D23"
-            ph160bsUsdAddress = "D24"
-
-        Case Else
             ph160bsCadAddress = "P22"
             ph160bsUsdAddress = "P23"
-    End Select
-
-    ph160asProcessingDate = Date
-    ph160asMode = LDR_GetProcessingMode( _
-        ph160asProcessingDate, ph160asModeText)
-
-    Select Case ph160asMode
-        Case LDR_MODE_LONG_WEEKEND
-            ph160asUsdInterestAddress = "F7"
-            ph160asCadInterestAddress = "F8"
-
-        Case LDR_MODE_MONDAY
-            ph160asUsdInterestAddress = "E7"
-            ph160asCadInterestAddress = "E8"
-
-        Case Else
             ph160asUsdInterestAddress = "O6"
             ph160asCadInterestAddress = "O7"
     End Select
 
-    Set targetCells = New Collection
-    Set targetValues = New Collection
-    Set targetDetails = New Collection
-
     ' RT624BS PB interest: source currency S17:S28, difference V17:V28.
-    LDR_QueueRange sourceWs, loaderWs, 17, 28, _
-                   "RT624BS", "PBINTEREST", _
-                   headerRow, entityColumn, amountColumn, _
-                   currencyColumn, annotationColumn, _
-                   targetCells, targetValues, targetDetails, problems
+    LDR_QueueRange ctx, sourceWs, 17, 28, "RT624BS", "PBINTEREST"
 
     ' RT624BS stock loan: source currency S3:S14, difference V3:V14.
-    LDR_QueueRange sourceWs, loaderWs, 3, 14, _
-                   "RT624BS", "STOCKLOANFEE", _
-                   headerRow, entityColumn, amountColumn, _
-                   currencyColumn, annotationColumn, _
-                   targetCells, targetValues, targetDetails, problems
+    LDR_QueueRange ctx, sourceWs, 3, 14, "RT624BS", "STOCKLOANFEE"
 
     ' New Scotia PB-interest funds. Currency is read from column S.
-    LDR_QueueOne sourceWs, loaderWs, 42, _
-                 "RT730AS", "PBINTEREST", _
-                 headerRow, entityColumn, amountColumn, _
-                 currencyColumn, annotationColumn, _
-                 targetCells, targetValues, targetDetails, problems
+    LDR_QueueOne ctx, sourceWs, 42, "RT730AS", "PBINTEREST"
+    LDR_QueueOne ctx, sourceWs, 47, "RT730BS", "PBINTEREST"
+    LDR_QueueOne ctx, sourceWs, 50, "RT731AS", "PBINTEREST"
+    LDR_QueueOne ctx, sourceWs, 53, "RT731BS", "PBINTEREST"
+    LDR_QueueOne ctx, sourceWs, 56, "RT732AS", "PBINTEREST"
+    LDR_QueueOne ctx, sourceWs, 59, "RT732BS", "PBINTEREST"
 
-    LDR_QueueOne sourceWs, loaderWs, 47, _
-                 "RT730BS", "PBINTEREST", _
-                 headerRow, entityColumn, amountColumn, _
-                 currencyColumn, annotationColumn, _
-                 targetCells, targetValues, targetDetails, problems
+    LDR_QueueFixedCell ctx, ph632Rt684Ws, "T3", "CAD", "PH632M", "STOCKLOANFEE"
+    LDR_QueueFixedCell ctx, ph632Rt684Ws, "T4", "USD", "PH632M", "STOCKLOANFEE"
 
-    LDR_QueueOne sourceWs, loaderWs, 50, _
-                 "RT731AS", "PBINTEREST", _
-                 headerRow, entityColumn, amountColumn, _
-                 currencyColumn, annotationColumn, _
-                 targetCells, targetValues, targetDetails, problems
+    LDR_QueueFixedCell ctx, ph632Rt684Ws, _
+                       interestSourceColumn & CStr(ph632InterestFirstRow), _
+                       "CAD", "PH632M", "PBINTEREST"
+    LDR_QueueFixedCell ctx, ph632Rt684Ws, _
+                       interestSourceColumn & CStr(ph632InterestFirstRow + 1), _
+                       "USD", "PH632M", "PBINTEREST"
 
-    LDR_QueueOne sourceWs, loaderWs, 53, _
-                 "RT731BS", "PBINTEREST", _
-                 headerRow, entityColumn, amountColumn, _
-                 currencyColumn, annotationColumn, _
-                 targetCells, targetValues, targetDetails, problems
+    LDR_QueueFixedCell ctx, ph632Rt684Ws, "T8", "CAD", "RT684M", "STOCKLOANFEE"
+    LDR_QueueFixedCell ctx, ph632Rt684Ws, "T9", "USD", "RT684M", "STOCKLOANFEE"
 
-    LDR_QueueOne sourceWs, loaderWs, 56, _
-                 "RT732AS", "PBINTEREST", _
-                 headerRow, entityColumn, amountColumn, _
-                 currencyColumn, annotationColumn, _
-                 targetCells, targetValues, targetDetails, problems
+    LDR_QueueFixedCell ctx, ph632Rt684Ws, _
+                       interestSourceColumn & CStr(rt684InterestFirstRow), _
+                       "CAD", "RT684M", "PBINTEREST"
+    LDR_QueueFixedCell ctx, ph632Rt684Ws, _
+                       interestSourceColumn & CStr(rt684InterestFirstRow + 1), _
+                       "USD", "RT684M", "PBINTEREST"
 
-    LDR_QueueOne sourceWs, loaderWs, 59, _
-                 "RT732BS", "PBINTEREST", _
-                 headerRow, entityColumn, amountColumn, _
-                 currencyColumn, annotationColumn, _
-                 targetCells, targetValues, targetDetails, problems
-
-    ' PH632M stock-loan differences.
-    LDR_QueueFixedCell ph632Rt684Ws, loaderWs, "T3", "CAD", _
-                       "PH632M", "STOCKLOANFEE", _
-                       headerRow, entityColumn, amountColumn, _
-                       currencyColumn, annotationColumn, _
-                       targetCells, targetValues, targetDetails, problems
-
-    LDR_QueueFixedCell ph632Rt684Ws, loaderWs, "T4", "USD", _
-                       "PH632M", "STOCKLOANFEE", _
-                       headerRow, entityColumn, amountColumn, _
-                       currencyColumn, annotationColumn, _
-                       targetCells, targetValues, targetDetails, problems
-
-    ' PH632M PB interest: X normally, I on Monday, J after a
-    ' Canadian long weekend.
-    LDR_QueueFixedCell ph632Rt684Ws, loaderWs, _
-                       interestSourceColumn & "3", "CAD", _
-                       "PH632M", "PBINTEREST", _
-                       headerRow, entityColumn, amountColumn, _
-                       currencyColumn, annotationColumn, _
-                       targetCells, targetValues, targetDetails, problems
-
-    LDR_QueueFixedCell ph632Rt684Ws, loaderWs, _
-                       interestSourceColumn & "4", "USD", _
-                       "PH632M", "PBINTEREST", _
-                       headerRow, entityColumn, amountColumn, _
-                       currencyColumn, annotationColumn, _
-                       targetCells, targetValues, targetDetails, problems
-
-    ' RT684M stock-loan differences.
-    LDR_QueueFixedCell ph632Rt684Ws, loaderWs, "T8", "CAD", _
-                       "RT684M", "STOCKLOANFEE", _
-                       headerRow, entityColumn, amountColumn, _
-                       currencyColumn, annotationColumn, _
-                       targetCells, targetValues, targetDetails, problems
-
-    LDR_QueueFixedCell ph632Rt684Ws, loaderWs, "T9", "USD", _
-                       "RT684M", "STOCKLOANFEE", _
-                       headerRow, entityColumn, amountColumn, _
-                       currencyColumn, annotationColumn, _
-                       targetCells, targetValues, targetDetails, problems
-
-    ' RT684M PB interest uses the same date rule.
-    LDR_QueueFixedCell ph632Rt684Ws, loaderWs, _
-                       interestSourceColumn & "8", "CAD", _
-                       "RT684M", "PBINTEREST", _
-                       headerRow, entityColumn, amountColumn, _
-                       currencyColumn, annotationColumn, _
-                       targetCells, targetValues, targetDetails, problems
-
-    LDR_QueueFixedCell ph632Rt684Ws, loaderWs, _
-                       interestSourceColumn & "9", "USD", _
-                       "RT684M", "PBINTEREST", _
-                       headerRow, entityColumn, amountColumn, _
-                       currencyColumn, annotationColumn, _
-                       targetCells, targetValues, targetDetails, problems
-
-    ' RT624CS stock loan.
-    ' Normal: M13:M14. Monday: E2:E3. Long weekend: F2:F3.
-    LDR_QueueFixedCell rt624csWs, loaderWs, _
-                       rt624csStockColumn & _
-                       CStr(rt624csStockFirstRow), "JPY", _
-                       "RT624CS", "STOCKLOANFEE", _
-                       headerRow, entityColumn, amountColumn, _
-                       currencyColumn, annotationColumn, _
-                       targetCells, targetValues, targetDetails, problems
-
-    LDR_QueueFixedCell rt624csWs, loaderWs, _
-                       rt624csStockColumn & _
-                       CStr(rt624csStockFirstRow + 1), "SGD", _
-                       "RT624CS", "STOCKLOANFEE", _
-                       headerRow, entityColumn, amountColumn, _
-                       currencyColumn, annotationColumn, _
-                       targetCells, targetValues, targetDetails, problems
+    LDR_QueueFixedCell ctx, rt624csWs, _
+                       rt624csStockColumn & CStr(rt624csStockFirstRow), _
+                       "JPY", "RT624CS", "STOCKLOANFEE"
+    LDR_QueueFixedCell ctx, rt624csWs, _
+                       rt624csStockColumn & CStr(rt624csStockFirstRow + 1), _
+                       "SGD", "RT624CS", "STOCKLOANFEE"
 
     ' RT624CS PB interest currencies, in source-row order.
-    ' Normal: N3:N8. Monday: E11:E16. Long weekend: F11:F16.
-    rt624csCurrencies = Array( _
-        "HKD", "JPY", "NZD", "SGD", "USD", "AUD")
+    rt624csCurrencies = Array("HKD", "JPY", "NZD", "SGD", "USD", "AUD")
 
     For mappingIndex = LBound(rt624csCurrencies) To UBound(rt624csCurrencies)
 
-        LDR_QueueFixedCell rt624csWs, loaderWs, _
+        LDR_QueueFixedCell ctx, rt624csWs, _
                            rt624csInterestColumn & _
                            CStr(rt624csInterestFirstRow + mappingIndex), _
                            CStr(rt624csCurrencies(mappingIndex)), _
-                           "RT624CS", "PBINTEREST", _
-                           headerRow, entityColumn, amountColumn, _
-                           currencyColumn, annotationColumn, _
-                           targetCells, targetValues, targetDetails, problems
+                           "RT624CS", "PBINTEREST"
     Next mappingIndex
 
-    ' PH160BS PB interest.
-    ' Normal: P22:P23. Monday: D23:D24.
-    ' Canadian long weekend: E23:E24.
-    LDR_QueueFixedCell ph160bsWs, loaderWs, _
-                       ph160bsCadAddress, "CAD", _
-                       "PH160BS", "PBINTEREST", _
-                       headerRow, entityColumn, amountColumn, _
-                       currencyColumn, annotationColumn, _
-                       targetCells, targetValues, targetDetails, problems
+    LDR_QueueFixedCell ctx, ph160bsWs, ph160bsCadAddress, _
+                       "CAD", "PH160BS", "PBINTEREST"
+    LDR_QueueFixedCell ctx, ph160bsWs, ph160bsUsdAddress, _
+                       "USD", "PH160BS", "PBINTEREST"
 
-    LDR_QueueFixedCell ph160bsWs, loaderWs, _
-                       ph160bsUsdAddress, "USD", _
-                       "PH160BS", "PBINTEREST", _
-                       headerRow, entityColumn, amountColumn, _
-                       currencyColumn, annotationColumn, _
-                       targetCells, targetValues, targetDetails, problems
-
-    ' PH160AS is driven directly from the four existing PH160AS
-    ' loader rows. This avoids a silent miss caused by label formatting.
-    LDR_QueuePH160ASRows ph160asWs, loaderWs, _
+    ' PH160AS is driven directly from the four existing PH160AS loader rows.
+    ' This avoids a silent miss caused by label formatting.
+    LDR_QueuePH160ASRows ctx, ph160asWs, _
                          ph160asUsdInterestAddress, _
-                         ph160asCadInterestAddress, _
-                         headerRow, entityColumn, amountColumn, _
-                         currencyColumn, annotationColumn, _
-                         targetCells, targetValues, targetDetails, problems
+                         ph160asCadInterestAddress
+
+    LDR_LogRun ctx, loaderWb, runDate, modeText, dateNotes
 
     ' Preflight finishes before any loader cell is changed.
-    If Len(problems) > 0 Then
+    If Len(ctx.Problems) > 0 Then
         Err.Raise vbObjectError + 7105, _
                   "Load_PB_Differences_ValuesOnly", _
-                  "Nothing was written because:" & vbCrLf & problems
+                  "Nothing was written because:" & vbCrLf & ctx.Problems
     End If
 
-    If targetCells.Count = 0 Then
-        MsgBox "Paste Done", vbInformation, "PB Loader"
-        Exit Sub
-    End If
+    If ctx.TargetCells.Count = 0 Then GoTo LDR_CleanUp
 
     oldScreenUpdating = Application.ScreenUpdating
     oldEnableEvents = Application.EnableEvents
+    oldCalculation = Application.Calculation
     settingsChanged = True
 
     Application.ScreenUpdating = False
     Application.EnableEvents = False
+    Application.Calculation = xlCalculationManual
 
     ' Value-only write. No Copy/PasteSpecial is used.
-    For i = 1 To targetCells.Count
-        Set targetCell = targetCells(i)
-        targetCell.Value2 = CDbl(targetValues(i))
+    For i = 1 To ctx.TargetCells.Count
+        Set targetCell = ctx.TargetCells(i)
+        targetCell.Value2 = CDbl(ctx.TargetValues(i))
+        writtenCount = writtenCount + 1
     Next i
 
     loaderWb.Activate
-    loaderWs.Activate
+    ctx.LoaderWs.Activate
 
 LDR_CleanUp:
     On Error Resume Next
     Application.CutCopyMode = False
 
     If settingsChanged Then
+        Application.Calculation = oldCalculation
         Application.EnableEvents = oldEnableEvents
         Application.ScreenUpdating = oldScreenUpdating
     End If
 
     On Error GoTo 0
 
-    If Len(errorText) > 0 Then
-        MsgBox errorText, vbExclamation, "PB Loader"
-    ElseIf Not targetCells Is Nothing Then
-        If targetCells.Count > 0 Then
-            MsgBox "Paste Done", vbInformation, "PB Loader"
-        End If
-    End If
+    If Len(errorText) > 0 Then Debug.Print errorText
+
+    MsgBox "Paste Done", vbInformation, "PB Loader"
 
     Exit Sub
 
 LDR_Failed:
     errorText = "Loader stopped: " & Err.Description
+
+    If writtenCount > 0 Then
+        errorText = errorText & vbCrLf & CStr(writtenCount) & " of " & _
+                    CStr(ctx.TargetCells.Count) & _
+                    " values had already been written. Last one: " & _
+                    CStr(ctx.TargetDetails(writtenCount))
+    End If
+
     Resume LDR_CleanUp
 End Sub
 
-Private Sub LDR_QueueRange(ByVal sourceWs As Worksheet, _
-                           ByVal loaderWs As Worksheet, _
+' Reads the loader key columns once, so every later lookup is a dictionary
+' hit instead of a fresh sweep of the sheet.
+Private Sub LDR_BuildContext(ByRef ctx As LDR_Context, _
+                             ByVal loaderWb As Workbook)
+    Dim rowNumber As Long
+    Dim offsetIndex As Long
+    Dim keyText As String
+
+    Set ctx.LoaderWs = LDR_GetWorksheetFlexible(loaderWb, LDR_TARGET_SHEET)
+    If ctx.LoaderWs Is Nothing Then
+        Err.Raise vbObjectError + 7102, _
+                  "Load_PB_Differences_ValuesOnly", _
+                  "Loader tab not found: " & LDR_TARGET_SHEET
+    End If
+
+    If ctx.LoaderWs.ProtectContents Then
+        Err.Raise vbObjectError + 7103, _
+                  "Load_PB_Differences_ValuesOnly", _
+                  "Loader tab is protected: " & ctx.LoaderWs.Name
+    End If
+
+    ctx.HeaderRow = LDR_FindHeaderRow(ctx.LoaderWs)
+    If ctx.HeaderRow = 0 Then
+        Err.Raise vbObjectError + 7104, _
+                  "Load_PB_Differences_ValuesOnly", _
+                  "ENTITY ID / AMOUNT / CURRENCY / ANNOTATION headers were not found."
+    End If
+
+    ctx.EntityColumn = LDR_FindHeaderColumn(ctx.LoaderWs, ctx.HeaderRow, "entityid")
+    ctx.AmountColumn = LDR_FindHeaderColumn(ctx.LoaderWs, ctx.HeaderRow, "amount")
+    ctx.CurrencyColumn = LDR_FindHeaderColumn(ctx.LoaderWs, ctx.HeaderRow, "currency")
+    ctx.AnnotationColumn = LDR_FindHeaderColumn(ctx.LoaderWs, ctx.HeaderRow, "annotation")
+
+    ' Partial header matching can land two tokens on one column, which would
+    ' send amounts into a key column.
+    If LDR_HasRepeatedColumn(ctx) Then
+        Err.Raise vbObjectError + 7110, _
+                  "Load_PB_Differences_ValuesOnly", _
+                  "Two of the ENTITY ID / AMOUNT / CURRENCY / ANNOTATION " & _
+                  "headers resolved to the same column on row " & _
+                  CStr(ctx.HeaderRow) & ". Rename the headers so each is distinct."
+    End If
+
+    ctx.FirstDataRow = ctx.HeaderRow + 1
+    ctx.LastRow = LDR_LastUsedRow(ctx.LoaderWs)
+
+    Set ctx.RowIndex = CreateObject("Scripting.Dictionary")
+    Set ctx.TargetIndex = CreateObject("Scripting.Dictionary")
+    Set ctx.TargetCells = New Collection
+    Set ctx.TargetValues = New Collection
+    Set ctx.TargetDetails = New Collection
+
+    If ctx.LastRow < ctx.FirstDataRow Then Exit Sub
+
+    ctx.EntityValues = LDR_ColumnValues( _
+        ctx.LoaderWs, ctx.EntityColumn, ctx.FirstDataRow, ctx.LastRow)
+    ctx.CurrencyValues = LDR_ColumnValues( _
+        ctx.LoaderWs, ctx.CurrencyColumn, ctx.FirstDataRow, ctx.LastRow)
+    ctx.AnnotationValues = LDR_ColumnValues( _
+        ctx.LoaderWs, ctx.AnnotationColumn, ctx.FirstDataRow, ctx.LastRow)
+
+    For offsetIndex = 1 To UBound(ctx.EntityValues)
+        rowNumber = ctx.FirstDataRow + offsetIndex - 1
+        keyText = LDR_RowKey(ctx, offsetIndex)
+
+        If Len(Replace(keyText, "|", "")) > 0 Then
+            If ctx.RowIndex.Exists(keyText) Then
+                ' Only the first row of a repeated key is updated, so the
+                ' later ones keep the amount from an earlier run.
+                LDR_AddWarning ctx, _
+                    "Loader rows " & CStr(ctx.RowIndex(keyText)) & " and " & _
+                    CStr(rowNumber) & " have the same ENTITY ID / CURRENCY / " & _
+                    "ANNOTATION; only row " & CStr(ctx.RowIndex(keyText)) & _
+                    " is updated."
+            Else
+                ctx.RowIndex.Add keyText, rowNumber
+            End If
+        End If
+    Next offsetIndex
+End Sub
+
+Private Function LDR_HasRepeatedColumn(ByRef ctx As LDR_Context) As Boolean
+    If ctx.EntityColumn = ctx.AmountColumn _
+       Or ctx.EntityColumn = ctx.CurrencyColumn _
+       Or ctx.EntityColumn = ctx.AnnotationColumn _
+       Or ctx.AmountColumn = ctx.CurrencyColumn _
+       Or ctx.AmountColumn = ctx.AnnotationColumn _
+       Or ctx.CurrencyColumn = ctx.AnnotationColumn Then
+
+        LDR_HasRepeatedColumn = True
+    End If
+End Function
+
+Private Function LDR_RowKey(ByRef ctx As LDR_Context, _
+                            ByVal offsetIndex As Long) As String
+
+    LDR_RowKey = LDR_MakeKey( _
+        LDR_SafeText(ctx.EntityValues(offsetIndex)), _
+        LDR_SafeText(ctx.CurrencyValues(offsetIndex)), _
+        LDR_SafeText(ctx.AnnotationValues(offsetIndex)))
+End Function
+
+Private Function LDR_MakeKey(ByVal entityId As String, _
+                             ByVal currencyText As String, _
+                             ByVal annotationText As String) As String
+
+    LDR_MakeKey = LDR_NormalizeText(entityId) & "|" & _
+                  LDR_NormalizeText(currencyText) & "|" & _
+                  LDR_NormalizeText(annotationText)
+End Function
+
+Private Sub LDR_QueueRange(ByRef ctx As LDR_Context, _
+                           ByVal sourceWs As Worksheet, _
                            ByVal firstSourceRow As Long, _
                            ByVal lastSourceRow As Long, _
                            ByVal entityId As String, _
-                           ByVal annotationText As String, _
-                           ByVal headerRow As Long, _
-                           ByVal entityColumn As Long, _
-                           ByVal amountColumn As Long, _
-                           ByVal currencyColumn As Long, _
-                           ByVal annotationColumn As Long, _
-                           ByVal targetCells As Collection, _
-                           ByVal targetValues As Collection, _
-                           ByVal targetDetails As Collection, _
-                           ByRef problems As String)
+                           ByVal annotationText As String)
     Dim sourceRow As Long
 
     For sourceRow = firstSourceRow To lastSourceRow
-        LDR_QueueOne sourceWs, loaderWs, sourceRow, _
-                     entityId, annotationText, _
-                     headerRow, entityColumn, amountColumn, _
-                     currencyColumn, annotationColumn, _
-                     targetCells, targetValues, targetDetails, problems
+        LDR_QueueOne ctx, sourceWs, sourceRow, entityId, annotationText
     Next sourceRow
 End Sub
 
-Private Sub LDR_QueueOne(ByVal sourceWs As Worksheet, _
-                         ByVal loaderWs As Worksheet, _
+' Difference in column V, currency in column S of the same row.
+Private Sub LDR_QueueOne(ByRef ctx As LDR_Context, _
+                         ByVal sourceWs As Worksheet, _
                          ByVal sourceRow As Long, _
                          ByVal entityId As String, _
-                         ByVal annotationText As String, _
-                         ByVal headerRow As Long, _
-                         ByVal entityColumn As Long, _
-                         ByVal amountColumn As Long, _
-                         ByVal currencyColumn As Long, _
-                         ByVal annotationColumn As Long, _
-                         ByVal targetCells As Collection, _
-                         ByVal targetValues As Collection, _
-                         ByVal targetDetails As Collection, _
-                         ByRef problems As String)
-    Dim differenceValue As Double
+                         ByVal annotationText As String)
+    Dim reading As LDR_Reading
     Dim currencyText As String
-    Dim loaderRow As Long
-    Dim amountCell As Range
-    Dim detailText As String
 
-    If Not LDR_TryReadDifference( _
-        sourceWs.Range("V" & CStr(sourceRow)).Value2, differenceValue) Then
-        Exit Sub
-    End If
-
-    currencyText = UCase$(Trim$(CStr( _
+    currencyText = UCase$(Trim$(LDR_SafeText( _
         sourceWs.Range("S" & CStr(sourceRow)).Value2)))
 
-    detailText = entityId & " / " & currencyText & _
-                 " / " & annotationText & _
-                 " from V" & CStr(sourceRow)
+    reading = LDR_ReadCell(sourceWs.Range("V" & CStr(sourceRow)))
+
+    ' A row with neither a currency nor a difference is an unused row in the
+    ' source block, not a mapping that went missing.
+    If Len(currencyText) = 0 And reading.Status = LDR_READ_BLANK Then Exit Sub
 
     If Len(currencyText) = 0 Then
-        problems = problems & "- Currency is blank in S" & _
-                   CStr(sourceRow) & " for " & entityId & "." & vbCrLf
+        LDR_AddProblem ctx, _
+            "Currency is blank in S" & CStr(sourceRow) & " for " & entityId & "."
         Exit Sub
     End If
 
-    loaderRow = LDR_FindMatchRow( _
-        loaderWs, headerRow, entityColumn, currencyColumn, _
-        annotationColumn, entityId, currencyText, annotationText)
-
-    ' No matching loader row means this combination has no loader data.
-    If loaderRow = 0 Then Exit Sub
-
-    Set amountCell = loaderWs.Cells(loaderRow, amountColumn)
-
-    ' Protect an existing formula in the destination AMOUNT cell.
-    If amountCell.HasFormula Then
-        problems = problems & "- Formula found in " & _
-                   amountCell.Address(False, False) & _
-                   "; it was protected. Mapping: " & _
-                   detailText & "." & vbCrLf
-        Exit Sub
-    End If
-
-    targetCells.Add amountCell
-    targetValues.Add differenceValue
-    targetDetails.Add detailText
+    LDR_QueueValue ctx, entityId, currencyText, annotationText, reading, _
+                   sourceWs.Name & "!V" & CStr(sourceRow)
 End Sub
 
-Private Sub LDR_QueueFixedCell(ByVal sourceWs As Worksheet, _
-                               ByVal loaderWs As Worksheet, _
+Private Sub LDR_QueueFixedCell(ByRef ctx As LDR_Context, _
+                               ByVal sourceWs As Worksheet, _
                                ByVal sourceAddress As String, _
                                ByVal currencyText As String, _
                                ByVal entityId As String, _
-                               ByVal annotationText As String, _
-                               ByVal headerRow As Long, _
-                               ByVal entityColumn As Long, _
-                               ByVal amountColumn As Long, _
-                               ByVal currencyColumn As Long, _
-                               ByVal annotationColumn As Long, _
-                               ByVal targetCells As Collection, _
-                               ByVal targetValues As Collection, _
-                               ByVal targetDetails As Collection, _
-                               ByRef problems As String)
-    Dim differenceValue As Double
-    Dim loaderRow As Long
-    Dim amountCell As Range
-    Dim detailText As String
+                               ByVal annotationText As String)
+    Dim reading As LDR_Reading
 
-    If Not LDR_TryReadDifference( _
-        sourceWs.Range(sourceAddress).Value2, differenceValue, True) Then
-        Exit Sub
-    End If
+    reading = LDR_ReadCell(sourceWs.Range(sourceAddress))
 
-    currencyText = UCase$(Trim$(currencyText))
-    detailText = entityId & " / " & currencyText & _
-                 " / " & annotationText & _
-                 " from " & sourceAddress
-
-    loaderRow = LDR_FindMatchRow( _
-        loaderWs, headerRow, entityColumn, currencyColumn, _
-        annotationColumn, entityId, currencyText, annotationText)
-
-    ' No matching loader row means this combination has no loader data.
-    If loaderRow = 0 Then Exit Sub
-
-    Set amountCell = loaderWs.Cells(loaderRow, amountColumn)
-
-    If amountCell.HasFormula Then
-        problems = problems & "- Formula found in " & _
-                   amountCell.Address(False, False) & _
-                   "; it was protected. Mapping: " & _
-                   detailText & "." & vbCrLf
-        Exit Sub
-    End If
-
-    targetCells.Add amountCell
-    targetValues.Add differenceValue
-    targetDetails.Add detailText
+    LDR_QueueValue ctx, entityId, UCase$(Trim$(currencyText)), annotationText, _
+                   reading, sourceWs.Name & "!" & sourceAddress
 End Sub
 
-Private Sub LDR_QueuePH160ASRows( _
-    ByVal sourceWs As Worksheet, _
-    ByVal loaderWs As Worksheet, _
-    ByVal usdInterestAddress As String, _
-    ByVal cadInterestAddress As String, _
-    ByVal headerRow As Long, _
-    ByVal entityColumn As Long, _
-    ByVal amountColumn As Long, _
-    ByVal currencyColumn As Long, _
-    ByVal annotationColumn As Long, _
-    ByVal targetCells As Collection, _
-    ByVal targetValues As Collection, _
-    ByVal targetDetails As Collection, _
-    ByRef problems As String)
+Private Sub LDR_QueuePH160ASRows(ByRef ctx As LDR_Context, _
+                                 ByVal sourceWs As Worksheet, _
+                                 ByVal usdInterestAddress As String, _
+                                 ByVal cadInterestAddress As String)
 
+    Dim offsetIndex As Long
     Dim rowNumber As Long
-    Dim finalRow As Long
-    Dim entityText As String
     Dim currencyText As String
     Dim annotationText As String
     Dim sourceAddress As String
-    Dim differenceValue As Double
-    Dim amountCell As Range
-    Dim detailText As String
+    Dim reading As LDR_Reading
 
-    finalRow = LDR_LastUsedRow(loaderWs)
+    If ctx.LastRow < ctx.FirstDataRow Then Exit Sub
 
-    For rowNumber = headerRow + 1 To finalRow
-        entityText = LDR_NormalizeText(CStr( _
-            loaderWs.Cells(rowNumber, entityColumn).Value2))
+    For offsetIndex = 1 To UBound(ctx.EntityValues)
 
-        If entityText = LDR_NormalizeText("PH160AS") Then
-            currencyText = UCase$(Trim$(CStr( _
-                loaderWs.Cells(rowNumber, currencyColumn).Value2)))
+        If LDR_NormalizeText(LDR_SafeText(ctx.EntityValues(offsetIndex))) = _
+           LDR_NormalizeText("PH160AS") Then
 
-            annotationText = LDR_NormalizeText(CStr( _
-                loaderWs.Cells(rowNumber, annotationColumn).Value2))
+            rowNumber = ctx.FirstDataRow + offsetIndex - 1
+            currencyText = UCase$(Trim$( _
+                LDR_SafeText(ctx.CurrencyValues(offsetIndex))))
+            annotationText = LDR_NormalizeText( _
+                LDR_SafeText(ctx.AnnotationValues(offsetIndex)))
 
             sourceAddress = vbNullString
 
-            If InStr(1, annotationText, _
-                     "stockloan", vbTextCompare) > 0 Then
+            If InStr(1, annotationText, "stockloan", vbTextCompare) > 0 Then
 
                 Select Case LDR_NormalizeText(currencyText)
                     Case "usd"
@@ -641,10 +514,7 @@ Private Sub LDR_QueuePH160ASRows( _
                         sourceAddress = "O3"
                 End Select
 
-            ElseIf InStr(1, annotationText, _
-                         "pbinterest", vbTextCompare) > 0 _
-                   Or InStr(1, annotationText, _
-                            "interest", vbTextCompare) > 0 Then
+            ElseIf InStr(1, annotationText, "interest", vbTextCompare) > 0 Then
 
                 Select Case LDR_NormalizeText(currencyText)
                     Case "usd"
@@ -655,150 +525,214 @@ Private Sub LDR_QueuePH160ASRows( _
             End If
 
             If Len(sourceAddress) > 0 Then
-                If LDR_TryReadDifference( _
-                    sourceWs.Range(sourceAddress).Value2, _
-                    differenceValue, True) Then
+                reading = LDR_ReadCell(sourceWs.Range(sourceAddress))
 
-                    Set amountCell = loaderWs.Cells( _
-                        rowNumber, amountColumn)
-
-                    detailText = "PH160AS / " & currencyText & _
-                                 " / " & annotationText & _
-                                 " from " & sourceAddress
-
-                    If amountCell.HasFormula Then
-                        problems = problems & "- Formula found in " & _
-                                   amountCell.Address(False, False) & _
-                                   "; it was protected. Mapping: " & _
-                                   detailText & "." & vbCrLf
-                    Else
-                        targetCells.Add amountCell
-                        targetValues.Add differenceValue
-                        targetDetails.Add detailText
-                    End If
-                End If
+                LDR_QueueValueAtRow ctx, rowNumber, _
+                    "PH160AS / " & currencyText & " / " & annotationText & _
+                    " from " & sourceWs.Name & "!" & sourceAddress, _
+                    reading
             End If
         End If
-    Next rowNumber
+    Next offsetIndex
 End Sub
 
-Private Function LDR_TryReadDifference(ByVal rawValue As Variant, _
-                                       ByRef resultValue As Double, _
-                                       Optional ByVal includeZero As Boolean = False) _
-                                       As Boolean
+Private Sub LDR_QueueValue(ByRef ctx As LDR_Context, _
+                           ByVal entityId As String, _
+                           ByVal currencyText As String, _
+                           ByVal annotationText As String, _
+                           ByRef reading As LDR_Reading, _
+                           ByVal sourceLabel As String)
+    Dim keyText As String
+    Dim detailText As String
+
+    detailText = entityId & " / " & currencyText & " / " & annotationText & _
+                 " from " & sourceLabel
+
+    keyText = LDR_MakeKey(entityId, currencyText, annotationText)
+
+    If Not ctx.RowIndex.Exists(keyText) Then
+        If reading.Status = LDR_READ_BLANK Then
+            LDR_AddWarning ctx, detailText & _
+                " - no matching loader row (source cell is empty)."
+        Else
+            LDR_AddWarning ctx, detailText & " - no matching loader row."
+        End If
+        Exit Sub
+    End If
+
+    LDR_QueueValueAtRow ctx, ctx.RowIndex(keyText), detailText, reading
+End Sub
+
+Private Sub LDR_QueueValueAtRow(ByRef ctx As LDR_Context, _
+                                ByVal loaderRow As Long, _
+                                ByVal detailText As String, _
+                                ByRef reading As LDR_Reading)
+    Dim amountCell As Range
+    Dim addressText As String
+
+    ' One unreadable cell is one mapping that cannot load. The others still
+    ' can, so it is recorded rather than treated as a reason to stop.
+    Select Case reading.Status
+        Case LDR_READ_ERROR
+            LDR_AddWarning ctx, detailText & " - source cell holds " & _
+                reading.DisplayText & "; loader row " & CStr(loaderRow) & _
+                " was left unchanged."
+            Exit Sub
+
+        Case LDR_READ_TEXT
+            LDR_AddWarning ctx, detailText & _
+                " - source cell is not a number (""" & reading.DisplayText & _
+                """); loader row " & CStr(loaderRow) & " was left unchanged."
+            Exit Sub
+
+        Case LDR_READ_BLANK
+            LDR_AddWarning ctx, detailText & _
+                " - source cell is empty; loader row " & CStr(loaderRow) & _
+                " was left unchanged."
+            Exit Sub
+    End Select
+
+    Set amountCell = ctx.LoaderWs.Cells(loaderRow, ctx.AmountColumn)
+    addressText = amountCell.Address(False, False)
+
+    ' Protect an existing formula in the destination AMOUNT cell.
+    If amountCell.HasFormula Then
+        LDR_AddProblem ctx, _
+            "Formula found in " & addressText & "; it was protected. Mapping: " & _
+            detailText & "."
+        Exit Sub
+    End If
+
+    ' Two mappings on one cell means the second write replaces the first.
+    If ctx.TargetIndex.Exists(addressText) Then
+        LDR_AddProblem ctx, _
+            "Two mappings both write to " & addressText & ": " & _
+            CStr(ctx.TargetIndex(addressText)) & " and " & detailText & "."
+        Exit Sub
+    End If
+
+    ctx.TargetIndex.Add addressText, detailText
+    ctx.TargetCells.Add amountCell
+    ctx.TargetValues.Add reading.Value
+    ctx.TargetDetails.Add detailText
+End Sub
+
+Private Sub LDR_AddProblem(ByRef ctx As LDR_Context, ByVal messageText As String)
+    ctx.Problems = ctx.Problems & "- " & messageText & vbCrLf
+End Sub
+
+Private Sub LDR_AddWarning(ByRef ctx As LDR_Context, ByVal messageText As String)
+    ctx.Warnings = ctx.Warnings & "- " & messageText & vbCrLf
+    ctx.WarningCount = ctx.WarningCount + 1
+End Sub
+
+' Takes the cell rather than its value, so a cell holding "N/A" or a label
+' can be named in the log instead of disappearing.
+Private Function LDR_ReadCell(ByVal sourceCell As Range) As LDR_Reading
+    Dim reading As LDR_Reading
+    Dim rawValue As Variant
     Dim textValue As String
     Dim negativeValue As Boolean
 
-    If IsError(rawValue) Or IsEmpty(rawValue) Then Exit Function
+    rawValue = sourceCell.Value2
 
-    If IsNumeric(rawValue) Then
-        resultValue = CDbl(rawValue)
+    If IsError(rawValue) Then
+        reading.Status = LDR_READ_ERROR
+        reading.DisplayText = LDR_CellText(sourceCell)
+        LDR_ReadCell = reading
+        Exit Function
+    End If
+
+    If IsEmpty(rawValue) Or IsNull(rawValue) Then
+        reading.Status = LDR_READ_BLANK
+        LDR_ReadCell = reading
+        Exit Function
+    End If
+
+    ' Numeric text goes through the text branch, which also handles thousands
+    ' separators and (1.23) for negatives.
+    If IsNumeric(rawValue) And VarType(rawValue) <> vbString Then
+        reading.Value = CDbl(rawValue)
     Else
-        textValue = Trim$(CStr(rawValue))
+        textValue = CStr(rawValue)
 
-        If Len(textValue) = 0 Or textValue = "-" Then Exit Function
+        ' Exports from other systems use a non-breaking space as a thousands
+        ' separator and a Unicode minus or dash for negatives.
+        textValue = Replace(textValue, ChrW(160), "")
+        textValue = Replace(textValue, ChrW(8722), "-")
+        textValue = Replace(textValue, ChrW(8211), "-")
+        textValue = Replace(textValue, ChrW(8212), "-")
+        textValue = Trim$(textValue)
+
+        If Len(textValue) = 0 Or textValue = "-" Then
+            reading.Status = LDR_READ_BLANK
+            LDR_ReadCell = reading
+            Exit Function
+        End If
+
+        reading.DisplayText = LDR_ShortText(textValue)
 
         textValue = Replace(textValue, ",", "")
         textValue = Replace(textValue, "$", "")
         textValue = Replace(textValue, " ", "")
 
-        If Left$(textValue, 1) = "(" And _
-           Right$(textValue, 1) = ")" Then
+        If Left$(textValue, 1) = "(" And Right$(textValue, 1) = ")" Then
             negativeValue = True
             textValue = Mid$(textValue, 2, Len(textValue) - 2)
+        ElseIf Right$(textValue, 1) = "-" Then
+            negativeValue = True
+            textValue = Left$(textValue, Len(textValue) - 1)
         End If
 
-        If Not IsNumeric(textValue) Then Exit Function
+        If Not IsNumeric(textValue) Then
+            reading.Status = LDR_READ_TEXT
+            LDR_ReadCell = reading
+            Exit Function
+        End If
 
-        resultValue = CDbl(textValue)
-        If negativeValue Then resultValue = -resultValue
+        reading.Value = CDbl(textValue)
+        If negativeValue Then reading.Value = -reading.Value
+        reading.DisplayText = vbNullString
     End If
 
-    resultValue = Application.WorksheetFunction.Round(resultValue, 2)
-
-    If includeZero Then
-        LDR_TryReadDifference = True
-    ElseIf Abs(resultValue) >= 0.01 Then
-        LDR_TryReadDifference = True
-    End If
+    reading.Value = Application.WorksheetFunction.Round(reading.Value, 2)
+    reading.Status = LDR_READ_OK
+    LDR_ReadCell = reading
 End Function
 
-Private Function LDR_GetPH632ProcessingDate( _
-    ByVal sourceWs As Worksheet) As Date
+Private Function LDR_CellText(ByVal sourceCell As Range) As String
+    Dim resultText As String
 
-    If IsDate(sourceWs.Range("H1").Value) Then
-        LDR_GetPH632ProcessingDate = _
-            DateValue(sourceWs.Range("H1").Value)
-    ElseIf IsDate(sourceWs.Range("H6").Value) Then
-        LDR_GetPH632ProcessingDate = _
-            DateValue(sourceWs.Range("H6").Value)
+    On Error Resume Next
+    resultText = CStr(sourceCell.Text)
+    On Error GoTo 0
+
+    ' A column too narrow to show the value gives back "###".
+    If Len(Replace(resultText, "#", "")) = 0 And Len(resultText) > 1 Then
+        resultText = vbNullString
+    End If
+
+    If Len(resultText) = 0 Then resultText = "an error value"
+
+    LDR_CellText = LDR_ShortText(resultText)
+End Function
+
+Private Function LDR_ShortText(ByVal textValue As String) As String
+    If Len(textValue) > LDR_MAX_CELL_TEXT Then
+        LDR_ShortText = Left$(textValue, LDR_MAX_CELL_TEXT) & "..."
     Else
-        LDR_GetPH632ProcessingDate = Date
+        LDR_ShortText = textValue
     End If
 End Function
 
-Private Function LDR_GetRT624CSProcessingDate( _
-    ByVal sourceWs As Worksheet) As Date
-
-    If IsDate(sourceWs.Range("B1").Value) Then
-        LDR_GetRT624CSProcessingDate = _
-            DateValue(sourceWs.Range("B1").Value)
-    ElseIf IsDate(sourceWs.Range("B10").Value) Then
-        LDR_GetRT624CSProcessingDate = _
-            DateValue(sourceWs.Range("B10").Value)
-    Else
-        LDR_GetRT624CSProcessingDate = Date
-    End If
-End Function
-
-Private Function LDR_GetPH160BSProcessingDate( _
-    ByVal sourceWs As Worksheet) As Date
-
-    If IsDate(sourceWs.Range("C22").Value) Then
-        LDR_GetPH160BSProcessingDate = _
-            DateValue(sourceWs.Range("C22").Value)
-    Else
-        LDR_GetPH160BSProcessingDate = Date
-    End If
-End Function
-
-Private Function LDR_GetPH160ASProcessingDate( _
-    ByVal sourceWs As Worksheet) As Date
-
-    If IsDate(sourceWs.Range("C6").Value) Then
-        LDR_GetPH160ASProcessingDate = _
-            DateValue(sourceWs.Range("C6").Value)
-    Else
-        LDR_GetPH160ASProcessingDate = Date
-    End If
-End Function
-
-Private Function LDR_GetInterestSourceColumn( _
-    ByVal processingDate As Date, _
-    ByRef modeText As String) As String
-
-    Select Case LDR_GetProcessingMode(processingDate, modeText)
-        Case LDR_MODE_LONG_WEEKEND
-            LDR_GetInterestSourceColumn = "J"
-
-        Case LDR_MODE_MONDAY
-            LDR_GetInterestSourceColumn = "I"
-
-        Case Else
-            LDR_GetInterestSourceColumn = "X"
-    End Select
-End Function
-
-Private Function LDR_GetProcessingMode( _
-    ByVal processingDate As Date, _
-    ByRef modeText As String) As Long
+Private Function LDR_GetProcessingMode(ByVal processingDate As Date, _
+                                       ByRef modeText As String) As Long
 
     Dim priorBusinessDate As Date
     Dim calendarDayGap As Long
 
     priorBusinessDate = LDR_PreviousCanadianBusinessDay(processingDate)
-    calendarDayGap = DateDiff( _
-        "d", priorBusinessDate, DateValue(processingDate))
+    calendarDayGap = DateDiff("d", priorBusinessDate, DateValue(processingDate))
 
     ' Check long weekend first. This covers:
     ' - Tuesday after a Canadian Monday holiday
@@ -813,6 +747,60 @@ Private Function LDR_GetProcessingMode( _
         LDR_GetProcessingMode = LDR_MODE_NORMAL
         modeText = "normal difference"
     End If
+End Function
+
+' The sheets carry the report date of the previous business day. Anything
+' else usually means the run is a day late or the wrong file is open.
+Private Function LDR_CollectDateNotes(ByVal runDate As Date, _
+                                      ByVal ph632Rt684Ws As Worksheet, _
+                                      ByVal rt624csWs As Worksheet, _
+                                      ByVal ph160bsWs As Worksheet, _
+                                      ByVal ph160asWs As Worksheet) As String
+    Dim expectedDate As Date
+    Dim resultText As String
+
+    expectedDate = LDR_PreviousCanadianBusinessDay(runDate)
+
+    LDR_AppendDateNote resultText, ph632Rt684Ws, Array("H1", "H6"), expectedDate
+    LDR_AppendDateNote resultText, rt624csWs, Array("B1", "B10"), expectedDate
+    LDR_AppendDateNote resultText, ph160bsWs, Array("C22"), expectedDate
+    LDR_AppendDateNote resultText, ph160asWs, Array("C6"), expectedDate
+
+    LDR_CollectDateNotes = resultText
+End Function
+
+Private Sub LDR_AppendDateNote(ByRef resultText As String, _
+                               ByVal ws As Worksheet, _
+                               ByVal addresses As Variant, _
+                               ByVal expectedDate As Date)
+    Dim sheetDate As Date
+
+    If ws Is Nothing Then Exit Sub
+    If Not LDR_TryGetSheetDate(ws, addresses, sheetDate) Then Exit Sub
+    If sheetDate = expectedDate Then Exit Sub
+
+    resultText = resultText & "- " & ws.Name & " reports " & _
+                 Format$(sheetDate, "yyyy-mm-dd") & ", expected " & _
+                 Format$(expectedDate, "yyyy-mm-dd") & "." & vbCrLf
+End Sub
+
+Private Function LDR_TryGetSheetDate(ByVal ws As Worksheet, _
+                                     ByVal addresses As Variant, _
+                                     ByRef resultDate As Date) As Boolean
+    Dim addressIndex As Long
+    Dim rawValue As Variant
+
+    For addressIndex = LBound(addresses) To UBound(addresses)
+        rawValue = ws.Range(CStr(addresses(addressIndex))).Value
+
+        If Not IsError(rawValue) Then
+            If IsDate(rawValue) Then
+                resultDate = DateValue(rawValue)
+                LDR_TryGetSheetDate = True
+                Exit Function
+            End If
+        End If
+    Next addressIndex
 End Function
 
 Private Function LDR_PreviousCanadianBusinessDay( _
@@ -830,6 +818,8 @@ Private Function LDR_PreviousCanadianBusinessDay( _
     LDR_PreviousCanadianBusinessDay = resultDate
 End Function
 
+' Ontario / TSX business-day calendar. Sep 30 and Nov 11 are federal
+' holidays but normal business days here, so they are not listed.
 Private Function LDR_IsCanadianBankHoliday( _
     ByVal dateToCheck As Date) As Boolean
 
@@ -841,55 +831,50 @@ Private Function LDR_IsCanadianBankHoliday( _
     calendarDate = DateValue(dateToCheck)
     calendarYear = Year(calendarDate)
 
-    ' Bank of Canada / Ontario business-day calendar.
-    If calendarDate = LDR_ObservedWeekday( _
-        DateSerial(calendarYear, 1, 1)) Then GoTo LDR_HolidayFound
-
-    If calendarDate = LDR_NthWeekdayOfMonth( _
-        calendarYear, 2, vbMonday, 3) Then GoTo LDR_HolidayFound
-
-    If calendarDate = LDR_EasterSunday( _
-        calendarYear) - 2 Then GoTo LDR_HolidayFound
-
-    If calendarDate = LDR_VictoriaDay( _
-        calendarYear) Then GoTo LDR_HolidayFound
-
-    If calendarDate = LDR_ObservedWeekday( _
-        DateSerial(calendarYear, 7, 1)) Then GoTo LDR_HolidayFound
-
-    If calendarDate = LDR_NthWeekdayOfMonth( _
-        calendarYear, 8, vbMonday, 1) Then GoTo LDR_HolidayFound
-
-    If calendarDate = LDR_NthWeekdayOfMonth( _
-        calendarYear, 9, vbMonday, 1) Then GoTo LDR_HolidayFound
-
-    If calendarDate = LDR_ObservedWeekday( _
-        DateSerial(calendarYear, 9, 30)) Then GoTo LDR_HolidayFound
-
-    If calendarDate = LDR_NthWeekdayOfMonth( _
-        calendarYear, 10, vbMonday, 2) Then GoTo LDR_HolidayFound
-
-    If calendarDate = LDR_ObservedWeekday( _
-        DateSerial(calendarYear, 11, 11)) Then GoTo LDR_HolidayFound
-
-    christmasObserved = LDR_ObservedWeekday( _
-        DateSerial(calendarYear, 12, 25))
-
-    boxingDayObserved = LDR_ObservedWeekday( _
-        DateSerial(calendarYear, 12, 26))
+    christmasObserved = LDR_ObservedWeekday(DateSerial(calendarYear, 12, 25))
+    boxingDayObserved = LDR_ObservedWeekday(DateSerial(calendarYear, 12, 26))
 
     Do While boxingDayObserved = christmasObserved _
              Or Weekday(boxingDayObserved, vbMonday) > 5
         boxingDayObserved = boxingDayObserved + 1
     Loop
 
-    If calendarDate = christmasObserved Then GoTo LDR_HolidayFound
-    If calendarDate = boxingDayObserved Then GoTo LDR_HolidayFound
+    If calendarDate = LDR_ObservedWeekday( _
+        DateSerial(calendarYear, 1, 1)) Then                        ' New Year
+        LDR_IsCanadianBankHoliday = True
 
-    Exit Function
+    ElseIf calendarDate = LDR_NthWeekdayOfMonth( _
+        calendarYear, 2, vbMonday, 3) Then                          ' Family Day
+        LDR_IsCanadianBankHoliday = True
 
-LDR_HolidayFound:
-    LDR_IsCanadianBankHoliday = True
+    ElseIf calendarDate = LDR_EasterSunday(calendarYear) - 2 Then   ' Good Friday
+        LDR_IsCanadianBankHoliday = True
+
+    ElseIf calendarDate = LDR_VictoriaDay(calendarYear) Then        ' Victoria Day
+        LDR_IsCanadianBankHoliday = True
+
+    ElseIf calendarDate = LDR_ObservedWeekday( _
+        DateSerial(calendarYear, 7, 1)) Then                        ' Canada Day
+        LDR_IsCanadianBankHoliday = True
+
+    ElseIf calendarDate = LDR_NthWeekdayOfMonth( _
+        calendarYear, 8, vbMonday, 1) Then                          ' Civic Holiday
+        LDR_IsCanadianBankHoliday = True
+
+    ElseIf calendarDate = LDR_NthWeekdayOfMonth( _
+        calendarYear, 9, vbMonday, 1) Then                          ' Labour Day
+        LDR_IsCanadianBankHoliday = True
+
+    ElseIf calendarDate = LDR_NthWeekdayOfMonth( _
+        calendarYear, 10, vbMonday, 2) Then                         ' Thanksgiving
+        LDR_IsCanadianBankHoliday = True
+
+    ElseIf calendarDate = christmasObserved Then                    ' Christmas
+        LDR_IsCanadianBankHoliday = True
+
+    ElseIf calendarDate = boxingDayObserved Then                    ' Boxing Day
+        LDR_IsCanadianBankHoliday = True
+    End If
 End Function
 
 Private Function LDR_ObservedWeekday(ByVal holidayDate As Date) As Date
@@ -913,12 +898,9 @@ Private Function LDR_NthWeekdayOfMonth( _
     Dim dayOffset As Long
 
     firstDate = DateSerial(calendarYear, calendarMonth, 1)
-    dayOffset = (weekdayNumber - _
-                 Weekday(firstDate, vbSunday) + 7) Mod 7
+    dayOffset = (weekdayNumber - Weekday(firstDate, vbSunday) + 7) Mod 7
 
-    LDR_NthWeekdayOfMonth = firstDate + _
-                            dayOffset + _
-                            (7 * (occurrenceNumber - 1))
+    LDR_NthWeekdayOfMonth = firstDate + dayOffset + (7 * (occurrenceNumber - 1))
 End Function
 
 Private Function LDR_VictoriaDay(ByVal calendarYear As Long) As Date
@@ -964,38 +946,70 @@ Private Function LDR_EasterSunday(ByVal calendarYear As Long) As Date
     easterMonth = (h + l - 7 * m + 114) \ 31
     easterDay = ((h + l - 7 * m + 114) Mod 31) + 1
 
-    LDR_EasterSunday = DateSerial( _
-        calendarYear, easterMonth, easterDay)
+    LDR_EasterSunday = DateSerial(calendarYear, easterMonth, easterDay)
 End Function
 
-Private Function LDR_FindMatchRow(ByVal ws As Worksheet, _
-                                  ByVal headerRow As Long, _
-                                  ByVal entityColumn As Long, _
-                                  ByVal currencyColumn As Long, _
-                                  ByVal annotationColumn As Long, _
-                                  ByVal entityId As String, _
-                                  ByVal currencyText As String, _
-                                  ByVal annotationText As String) As Long
-    Dim rowNumber As Long
-    Dim finalRow As Long
+Private Sub LDR_LogRun(ByRef ctx As LDR_Context, _
+                       ByVal loaderWb As Workbook, _
+                       ByVal runDate As Date, _
+                       ByVal modeText As String, _
+                       ByVal dateNotes As String)
+    Dim i As Long
 
-    finalRow = LDR_LastUsedRow(ws)
+    Debug.Print String$(60, "-")
+    Debug.Print "PB Loader run " & Format$(Now, "yyyy-mm-dd hh:nn:ss")
+    Debug.Print "Loader: " & loaderWb.Name & " / " & ctx.LoaderWs.Name
+    Debug.Print "Run date: " & Format$(runDate, "yyyy-mm-dd") & _
+                "  Mode: " & modeText
 
-    For rowNumber = headerRow + 1 To finalRow
-        If LDR_NormalizeText(CStr( _
-            ws.Cells(rowNumber, entityColumn).Value2)) = _
-            LDR_NormalizeText(entityId) _
-           And LDR_NormalizeText(CStr( _
-            ws.Cells(rowNumber, currencyColumn).Value2)) = _
-            LDR_NormalizeText(currencyText) _
-           And LDR_NormalizeText(CStr( _
-            ws.Cells(rowNumber, annotationColumn).Value2)) = _
-            LDR_NormalizeText(annotationText) Then
+    Debug.Print "Queued (" & CStr(ctx.TargetCells.Count) & "):"
+    For i = 1 To ctx.TargetCells.Count
+        Debug.Print "  " & ctx.TargetCells(i).Address(False, False) & " = " & _
+                    Format$(ctx.TargetValues(i), "0.00") & "  <- " & _
+                    CStr(ctx.TargetDetails(i))
+    Next i
 
-            LDR_FindMatchRow = rowNumber
-            Exit Function
-        End If
-    Next rowNumber
+    If Len(ctx.Problems) > 0 Then
+        Debug.Print "Problems (run will stop):"
+        Debug.Print ctx.Problems
+    End If
+
+    If Len(ctx.Warnings) > 0 Then
+        Debug.Print "Not loaded:"
+        Debug.Print ctx.Warnings
+    End If
+
+    If Len(dateNotes) > 0 Then
+        Debug.Print "Source report dates to check:"
+        Debug.Print dateNotes
+    End If
+End Sub
+
+Private Function LDR_ColumnValues(ByVal ws As Worksheet, _
+                                  ByVal columnNumber As Long, _
+                                  ByVal firstRow As Long, _
+                                  ByVal lastRow As Long) As Variant
+    Dim rawValues As Variant
+    Dim resultValues() As Variant
+    Dim rowCount As Long
+    Dim i As Long
+
+    rowCount = lastRow - firstRow + 1
+    ReDim resultValues(1 To rowCount)
+
+    If rowCount = 1 Then
+        ' A single cell returns a scalar rather than an array.
+        resultValues(1) = ws.Cells(firstRow, columnNumber).Value2
+    Else
+        rawValues = ws.Range(ws.Cells(firstRow, columnNumber), _
+                             ws.Cells(lastRow, columnNumber)).Value2
+
+        For i = 1 To rowCount
+            resultValues(i) = rawValues(i, 1)
+        Next i
+    End If
+
+    LDR_ColumnValues = resultValues
 End Function
 
 Private Function LDR_FindHeaderRow(ByVal ws As Worksheet) As Long
@@ -1013,21 +1027,36 @@ Private Function LDR_FindHeaderRow(ByVal ws As Worksheet) As Long
     Next rowNumber
 End Function
 
+' Exact header first. A partial match would otherwise take "BASE AMOUNT" or
+' "AMOUNT CCY" simply because it sits further left than the real column.
 Private Function LDR_FindHeaderColumn(ByVal ws As Worksheet, _
                                       ByVal headerRow As Long, _
                                       ByVal searchToken As String) As Long
     Dim lastColumn As Long
     Dim columnNumber As Long
+    Dim headerTexts() As String
     Dim normalizedText As String
 
     lastColumn = ws.Cells(headerRow, ws.Columns.Count).End(xlToLeft).Column
+    ReDim headerTexts(1 To lastColumn)
 
     For columnNumber = 1 To lastColumn
-        If Not IsError(ws.Cells(headerRow, columnNumber).Value2) Then
-            normalizedText = LDR_NormalizeText( _
-                CStr(ws.Cells(headerRow, columnNumber).Value2))
+        normalizedText = LDR_NormalizeText( _
+            LDR_SafeText(ws.Cells(headerRow, columnNumber).Value2))
 
-            If InStr(1, normalizedText, searchToken, vbTextCompare) > 0 Then
+        headerTexts(columnNumber) = normalizedText
+
+        If normalizedText = searchToken Then
+            LDR_FindHeaderColumn = columnNumber
+            Exit Function
+        End If
+    Next columnNumber
+
+    For columnNumber = 1 To lastColumn
+        If Len(headerTexts(columnNumber)) > 0 Then
+            If InStr(1, headerTexts(columnNumber), searchToken, _
+                     vbTextCompare) > 0 Then
+
                 LDR_FindHeaderColumn = columnNumber
                 Exit Function
             End If
@@ -1035,22 +1064,24 @@ Private Function LDR_FindHeaderColumn(ByVal ws As Worksheet, _
     Next columnNumber
 End Function
 
+' UsedRange rather than Range.Find, so the user's next manual Find is not
+' left with this macro's search options.
 Private Function LDR_LastUsedRow(ByVal ws As Worksheet) As Long
-    Dim finalCell As Range
+    LDR_LastUsedRow = ws.UsedRange.Row + ws.UsedRange.Rows.Count - 1
 
-    Set finalCell = ws.Cells.Find( _
-        What:="*", _
-        After:=ws.Cells(1, 1), _
-        LookIn:=xlFormulas, _
-        LookAt:=xlPart, _
-        SearchOrder:=xlByRows, _
-        SearchDirection:=xlPrevious, _
-        MatchCase:=False)
+    If LDR_LastUsedRow < 1 Then LDR_LastUsedRow = 1
+End Function
 
-    If finalCell Is Nothing Then
-        LDR_LastUsedRow = 1
-    Else
-        LDR_LastUsedRow = finalCell.Row
+Private Function LDR_RequireWorksheet(ByVal wb As Workbook, _
+                                      ByVal sheetName As String, _
+                                      ByVal errorNumber As Long) As Worksheet
+
+    Set LDR_RequireWorksheet = LDR_GetWorksheetFlexible(wb, sheetName)
+
+    If LDR_RequireWorksheet Is Nothing Then
+        Err.Raise vbObjectError + errorNumber, _
+                  "Load_PB_Differences_ValuesOnly", _
+                  "Source tab not found: " & sheetName
     End If
 End Function
 
@@ -1061,18 +1092,14 @@ Private Function LDR_FindOrOpenSourceWorkbook() As Workbook
 
     ' Prefer the workbook containing this macro. This prevents an older,
     ' still-open PB Summary workbook from being selected by accident.
-    Set candidateWs = Nothing
-    Set candidateWs = LDR_GetWorksheetFlexible( _
-        ThisWorkbook, LDR_SOURCE_SHEET)
+    Set candidateWs = LDR_GetWorksheetFlexible(ThisWorkbook, LDR_SOURCE_SHEET)
 
     If Not candidateWs Is Nothing Then
         Set LDR_FindOrOpenSourceWorkbook = ThisWorkbook
         Exit Function
     End If
 
-    ' Second preference: the workbook the user is currently viewing.
     If Not ActiveWorkbook Is Nothing Then
-        Set candidateWs = Nothing
         Set candidateWs = LDR_GetWorksheetFlexible( _
             ActiveWorkbook, LDR_SOURCE_SHEET)
 
@@ -1083,7 +1110,6 @@ Private Function LDR_FindOrOpenSourceWorkbook() As Workbook
     End If
 
     For Each wb In Application.Workbooks
-        Set candidateWs = Nothing
         Set candidateWs = LDR_GetWorksheetFlexible(wb, LDR_SOURCE_SHEET)
 
         If Not candidateWs Is Nothing Then
@@ -1092,8 +1118,7 @@ Private Function LDR_FindOrOpenSourceWorkbook() As Workbook
         End If
     Next wb
 
-    selectedPath = LDR_PickWorkbook( _
-        "Select the PB_Summary_NEW workbook")
+    selectedPath = LDR_PickWorkbook("Select the PB_Summary_NEW workbook")
 
     If Len(selectedPath) = 0 Then Exit Function
 
@@ -1115,7 +1140,6 @@ Private Function LDR_FindOrOpenLoaderWorkbook( _
     For Each wb In Application.Workbooks
         If Not wb Is sourceWb Then
             If InStr(1, wb.Name, "PB loader", vbTextCompare) > 0 Then
-                Set candidateWs = Nothing
                 Set candidateWs = LDR_GetWorksheetFlexible( _
                     wb, LDR_TARGET_SHEET)
 
@@ -1130,9 +1154,7 @@ Private Function LDR_FindOrOpenLoaderWorkbook( _
     ' Second preference: any other open workbook containing TEMPLATE.
     For Each wb In Application.Workbooks
         If Not wb Is sourceWb Then
-            Set candidateWs = Nothing
-            Set candidateWs = LDR_GetWorksheetFlexible( _
-                wb, LDR_TARGET_SHEET)
+            Set candidateWs = LDR_GetWorksheetFlexible(wb, LDR_TARGET_SHEET)
 
             If Not candidateWs Is Nothing Then
                 Set LDR_FindOrOpenLoaderWorkbook = wb
@@ -1141,8 +1163,7 @@ Private Function LDR_FindOrOpenLoaderWorkbook( _
         End If
     Next wb
 
-    selectedPath = LDR_PickWorkbook( _
-        "Select the PB loader template workbook")
+    selectedPath = LDR_PickWorkbook("Select the PB loader template workbook")
 
     If Len(selectedPath) = 0 Then Exit Function
 
@@ -1158,8 +1179,7 @@ Private Function LDR_PickWorkbook(ByVal dialogTitle As String) As String
         .Title = dialogTitle
         .AllowMultiSelect = False
         .Filters.Clear
-        .Filters.Add "Excel workbooks", _
-                     "*.xlsx;*.xls;*.xlsm;*.xlsb"
+        .Filters.Add "Excel workbooks", "*.xlsx;*.xls;*.xlsm;*.xlsb"
 
         If .Show = -1 Then LDR_PickWorkbook = .SelectedItems(1)
     End With
@@ -1170,6 +1190,8 @@ Private Function LDR_GetWorksheetFlexible(ByVal wb As Workbook, _
                                           As Worksheet
     Dim ws As Worksheet
     Dim normalizedExpected As String
+
+    If wb Is Nothing Then Exit Function
 
     On Error Resume Next
     Set LDR_GetWorksheetFlexible = wb.Worksheets(expectedName)
@@ -1185,6 +1207,16 @@ Private Function LDR_GetWorksheetFlexible(ByVal wb As Workbook, _
             Exit Function
         End If
     Next ws
+End Function
+
+' CStr on an error value raises a type mismatch, which used to surface as an
+' unrelated failure when a key column held #N/A.
+Private Function LDR_SafeText(ByVal rawValue As Variant) As String
+    If IsError(rawValue) Then Exit Function
+    If IsNull(rawValue) Then Exit Function
+    If IsEmpty(rawValue) Then Exit Function
+
+    LDR_SafeText = CStr(rawValue)
 End Function
 
 Private Function LDR_NormalizeText(ByVal textValue As String) As String
